@@ -34,8 +34,10 @@ type Config struct {
 	TLSCertFile string
 	TLSKeyFile  string
 
-	// APIKey, when non-empty, requires WebSocket clients to authenticate.
-	// Clients must provide "Authorization: Bearer <key>" or "?key=<key>".
+	// APIKey, when non-empty, requires WebSocket clients to authenticate via
+	// the "Authorization: Bearer <key>" request header.
+	// URL query parameters are NOT accepted to prevent credential leakage in
+	// server logs and browser history.
 	APIKey string
 
 	// MaxConns is the maximum number of concurrent WebSocket connections.
@@ -238,14 +240,13 @@ func NewServerWithConfig(cfg Config) *Server {
 // HandleWebSocket handles WebSocket connections
 func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// A1: API key authentication — checked before upgrade so we can return 401.
+	// Only the Authorization: Bearer <key> header is accepted.  URL query
+	// parameters are intentionally NOT supported: they appear in server access
+	// logs and browser history, creating a credential-leakage risk.
 	if s.cfg.APIKey != "" {
-		var key string
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			key = strings.TrimPrefix(auth, "Bearer ")
-		} else {
-			key = r.URL.Query().Get("key")
-		}
-		if key != s.cfg.APIKey {
+		auth := r.Header.Get("Authorization")
+		key := strings.TrimPrefix(auth, "Bearer ")
+		if key == "" || key == auth || key != s.cfg.APIKey {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -585,8 +586,12 @@ func (s *Server) handleCreateRWLock(conn *websocket.Conn, msg Message) {
 		return
 	}
 
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 
@@ -630,8 +635,12 @@ func (s *Server) handleCreateSemaphore(conn *websocket.Conn, msg Message) {
 		return
 	}
 
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 
@@ -678,8 +687,12 @@ func (s *Server) handleCreateMutex(conn *websocket.Conn, msg Message) {
 		return
 	}
 
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 
@@ -721,8 +734,12 @@ func (s *Server) handleCreateCondVar(conn *websocket.Conn, msg Message) {
 		return
 	}
 
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 
@@ -765,8 +782,12 @@ func (s *Server) handleCreateBarrier(conn *websocket.Conn, msg Message) {
 		return
 	}
 
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 
@@ -811,8 +832,12 @@ func (s *Server) handleCreateWaitGroup(conn *websocket.Conn, msg Message) {
 		s.sendError(conn, "Invalid payload")
 		return
 	}
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 	cp := s.connPrimsFor(conn)
@@ -848,8 +873,12 @@ func (s *Server) handleCreateOnce(conn *websocket.Conn, msg Message) {
 		s.sendError(conn, "Invalid payload")
 		return
 	}
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 	cp := s.connPrimsFor(conn)
@@ -885,8 +914,12 @@ func (s *Server) handleCreateSingleflight(conn *websocket.Conn, msg Message) {
 		s.sendError(conn, "Invalid payload")
 		return
 	}
-	if payload.ID == "" {
-		s.sendError(conn, "id must not be empty")
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
 		return
 	}
 	cp := s.connPrimsFor(conn)
@@ -973,6 +1006,34 @@ func (s *Server) handleGetMetrics(conn *websocket.Conn, msg Message) {
 		Type:    "metrics",
 		Payload: jsonMarshal(response),
 	})
+}
+
+// maxIDLen and maxNameLen are upper bounds for primitive identifiers and names.
+// Enforced on every create handler to prevent memory-exhaustion via oversized strings.
+const (
+	maxIDLen   = 256
+	maxNameLen = 256
+)
+
+// validatePrimID returns an error string when id is empty or exceeds maxIDLen.
+// Returns "" when the id is acceptable.
+func validatePrimID(id string) string {
+	if id == "" {
+		return "id must not be empty"
+	}
+	if len(id) > maxIDLen {
+		return fmt.Sprintf("id must not exceed %d characters", maxIDLen)
+	}
+	return ""
+}
+
+// validatePrimName returns an error string when name exceeds maxNameLen.
+// Returns "" when the name is acceptable.
+func validatePrimName(name string) string {
+	if len(name) > maxNameLen {
+		return fmt.Sprintf("name must not exceed %d characters", maxNameLen)
+	}
+	return ""
 }
 
 // clampHoldMs clamps an integer to [1, 5000], defaulting to 100 if zero.

@@ -315,7 +315,7 @@ func TestWebSocketAuthRequired(t *testing.T) {
 	}
 }
 
-// TestWebSocketAuthAccepted verifies that a correct key allows the upgrade.
+// TestWebSocketAuthAccepted verifies that a correct Bearer token allows the upgrade.
 func TestWebSocketAuthAccepted(t *testing.T) {
 	srv := web.NewServerWithConfig(web.Config{
 		AllowedOrigins: []string{"*"},
@@ -328,7 +328,7 @@ func TestWebSocketAuthAccepted(t *testing.T) {
 
 	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 
-	// Authorization: Bearer <key>
+	// Authorization: Bearer <key> must succeed.
 	headers := http.Header{"Authorization": []string{"Bearer secret123"}}
 	conn, _, err := websocket.DefaultDialer.Dial(u, headers)
 	if err != nil {
@@ -339,16 +339,29 @@ func TestWebSocketAuthAccepted(t *testing.T) {
 	if msg["type"] != "initialState" {
 		t.Errorf("expected initialState, got %v", msg["type"])
 	}
+}
 
-	// ?key=<key> query parameter
-	conn2, _, err := websocket.DefaultDialer.Dial(u+"?key=secret123", nil)
-	if err != nil {
-		t.Fatalf("expected successful dial with query key, got: %v", err)
+// TestWebSocketAuthQueryParamRejected verifies that supplying the API key as a
+// URL query parameter is rejected (credential leakage prevention).
+func TestWebSocketAuthQueryParamRejected(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		APIKey:         "secret123",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	// ?key= query param must NOT be accepted.
+	_, resp, err := websocket.DefaultDialer.Dial(u+"?key=secret123", nil)
+	if err == nil {
+		t.Fatal("expected dial to fail when key supplied via query param")
 	}
-	defer conn2.Close()
-	msg2 := readMsg(t, conn2)
-	if msg2["type"] != "initialState" {
-		t.Errorf("expected initialState via query key, got %v", msg2["type"])
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got: %v", resp)
 	}
 }
 
@@ -1023,5 +1036,49 @@ func TestHandleStaticMethodNotAllowed(t *testing.T) {
 		if resp.Header.Get("Allow") == "" {
 			t.Errorf("%s /: missing Allow header", method)
 		}
+	}
+}
+
+// TestInputLengthValidation verifies that oversized IDs and names are rejected
+// with an error response rather than being stored, preventing memory exhaustion.
+func TestInputLengthValidation(t *testing.T) {
+	ts, srv, cleanup := newTestServer(t)
+	defer cleanup()
+	_ = srv
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	drainUntilType(t, conn, "initialState")
+
+	longID := strings.Repeat("x", 257)
+	longName := strings.Repeat("y", 257)
+
+	// Oversized ID — must return error.
+	sendMsg(t, conn, "createRWLock", map[string]interface{}{
+		"id": longID, "name": "ok",
+	})
+	msg := drainUntilType(t, conn, "error")
+	if msg["type"] != "error" {
+		t.Errorf("expected error for oversized id, got %v", msg["type"])
+	}
+
+	// Oversized name — must return error.
+	sendMsg(t, conn, "createRWLock", map[string]interface{}{
+		"id": "ok-id", "name": longName,
+	})
+	msg = drainUntilType(t, conn, "error")
+	if msg["type"] != "error" {
+		t.Errorf("expected error for oversized name, got %v", msg["type"])
+	}
+
+	// Valid ID and name at max length — must succeed.
+	maxID := strings.Repeat("a", 256)
+	maxName := strings.Repeat("b", 256)
+	sendMsg(t, conn, "createRWLock", map[string]interface{}{
+		"id": maxID, "name": maxName,
+	})
+	msg = drainUntilType(t, conn, "success")
+	if msg["type"] != "success" {
+		t.Errorf("expected success for max-length id/name, got %v", msg["type"])
 	}
 }
