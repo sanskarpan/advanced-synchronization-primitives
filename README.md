@@ -148,55 +148,6 @@ The dashboard lets you create primitives, perform operations, and watch goroutin
 
 ---
 
-## `syncctl` CLI
-
-Build:
-
-```bash
-make syncctl
-```
-
-Global flags:
-
-- `--server` WebSocket URL (default: `ws://localhost:8085/ws`, env: `SYNCPRIM_SERVER`)
-- `--api-key` Bearer token (env: `SYNCPRIM_API_KEY`)
-- `--json` machine-readable JSON output
-- `--timeout` command timeout (default: `30s`)
-- `--insecure` skip TLS verification for `wss://` targets
-
-Commands:
-
-```bash
-syncctl list
-syncctl create mutex my-lock
-syncctl create semaphore sem-1 --capacity 5
-syncctl op my-lock lock --hold 500
-syncctl delete my-lock
-syncctl stats my-lock
-```
-
-JSON mode:
-
-```bash
-syncctl --json list
-syncctl --json stats my-lock
-```
-
-Using API key via environment variable (recommended for scripts):
-
-```bash
-export SYNCPRIM_API_KEY='your-secret-key'
-syncctl --server ws://localhost:8085/ws list
-```
-
-Cross-platform binaries:
-
-```bash
-make dist
-```
-
----
-
 ## Installation
 
 ```bash
