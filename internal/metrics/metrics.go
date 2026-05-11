@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// histBoundaries defines histogram bucket upper bounds in nanoseconds.
+// defaultHistBoundaries defines default histogram bucket upper bounds in nanoseconds.
 // Corresponds to: 100µs, 500µs, 1ms, 5ms, 10ms, 50ms, 100ms, 500ms, 1s.
-var histBoundaries = []int64{
+var defaultHistBoundaries = []int64{
 	100_000,       // 100µs
 	500_000,       // 500µs
 	1_000_000,     // 1ms
@@ -38,6 +38,7 @@ type MetricsCollector struct {
 	// Per-primitive metrics
 	primitiveMetrics map[string]*PrimitiveMetrics
 	mu               sync.RWMutex
+	histBoundaries   []int64
 }
 
 // PrimitiveMetrics contains metrics for a specific primitive
@@ -77,9 +78,24 @@ type PrimitiveMetrics struct {
 
 // NewMetricsCollector creates a new metrics collector
 func NewMetricsCollector() *MetricsCollector {
+	return NewMetricsCollectorWithBuckets(nil)
+}
+
+// NewMetricsCollectorWithBuckets creates a metrics collector with custom
+// histogram boundaries. Nil/empty buckets use defaults.
+func NewMetricsCollectorWithBuckets(buckets []time.Duration) *MetricsCollector {
+	bounds := make([]int64, 0, len(defaultHistBoundaries))
+	if len(buckets) == 0 {
+		bounds = append(bounds, defaultHistBoundaries...)
+	} else {
+		for _, b := range buckets {
+			bounds = append(bounds, b.Nanoseconds())
+		}
+	}
 	return &MetricsCollector{
 		startTime:        time.Now(),
 		primitiveMetrics: make(map[string]*PrimitiveMetrics),
+		histBoundaries:   bounds,
 	}
 }
 
@@ -92,10 +108,18 @@ func (mc *MetricsCollector) RegisterPrimitive(id, ptype, name string) {
 		Type:        ptype,
 		Name:        name,
 		CreatedAt:   time.Now(),
-		HistBuckets: histBoundaries,
-		HistCounts:  make([]atomic.Int64, len(histBoundaries)),
+		HistBuckets: append([]int64(nil), mc.histBoundaries...),
+		HistCounts:  make([]atomic.Int64, len(mc.histBoundaries)),
 	}
 	mc.primitiveMetrics[id] = pm
+}
+
+// GetHistogramBoundaries returns collector histogram bucket upper bounds in
+// nanoseconds.
+func (mc *MetricsCollector) GetHistogramBoundaries() []int64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return append([]int64(nil), mc.histBoundaries...)
 }
 
 // UnregisterPrimitive removes a primitive from metrics tracking
