@@ -7,18 +7,25 @@
     <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
+    <div id="notification-root" class="notification-root" aria-live="polite" aria-atomic="false"></div>
     <div class="container">
-        <header>
+        <header class="app-header">
             <div class="header-left">
                 <h1>Advanced Synchronization Primitives</h1>
                 <div class="subtitle">Real-time Visualization & Monitoring</div>
+                <div class="status-meta">
+                    <span class="meta-chip" id="namespace-badge">Namespace: default</span>
+                    <span class="meta-chip" id="sync-badge">Waiting for state</span>
+                </div>
             </div>
             <div class="status">
                 <button id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode" title="Toggle dark mode">
                     <span id="theme-icon">☀</span>
                 </button>
-                <span class="status-indicator" id="status-indicator"></span>
-                <span id="status-text">Connecting...</span>
+                <div class="status-copy">
+                    <span class="status-indicator" id="status-indicator" aria-hidden="true"></span>
+                    <span id="status-text" role="status" aria-live="polite">Connecting...</span>
+                </div>
             </div>
         </header>
 
@@ -26,14 +33,17 @@
             <div class="control-section">
                 <h3>Namespace</h3>
                 <div class="control-row">
+                    <label class="sr-only" for="namespace-input">Namespace</label>
                     <input type="text" id="namespace-input" placeholder="Namespace" />
                     <button id="namespace-apply-btn">Reconnect</button>
                 </div>
+                <p class="control-note">Connections in the same namespace share primitives. Reconnect applies the change.</p>
             </div>
 
             <div class="control-section">
                 <h3>Create Primitive</h3>
                 <div class="control-row">
+                    <label class="sr-only" for="primitive-type">Primitive type</label>
                     <select id="primitive-type">
                         <option value="rwlock">RWLock</option>
                         <option value="fairrwlock">FairRWLock</option>
@@ -45,10 +55,12 @@
                         <option value="once">Once</option>
                         <option value="singleflight">Singleflight</option>
                     </select>
+                    <label class="sr-only" for="primitive-name">Primitive name</label>
                     <input type="text" id="primitive-name" placeholder="Name" />
                     <div id="primitive-options"></div>
                     <button id="create-btn">Create</button>
                 </div>
+                <p class="control-note">Names are client-facing labels. IDs are generated automatically and stay unique per namespace.</p>
             </div>
 
             <div class="control-section">
@@ -65,15 +77,15 @@
             <div class="left-panel">
                 <div class="section">
                     <h2>Primitives <span class="count-badge" id="prim-count">0</span></h2>
-                    <div id="primitives-list" class="primitives-list">
+                    <div id="primitives-list" class="primitives-list" role="list" aria-label="Primitive list">
                         <!-- Primitives will be added here -->
                     </div>
                 </div>
 
                 <div class="section">
                     <h2>Goroutines</h2>
-                    <canvas id="goroutines-canvas"></canvas>
-                    <div id="goroutines-list" class="goroutines-list">
+                    <canvas id="goroutines-canvas" role="img" aria-label="Goroutine state visualization"></canvas>
+                    <div id="goroutines-list" class="goroutines-list" role="list" aria-label="Goroutine list">
                         <!-- Goroutines will be added here -->
                     </div>
                 </div>
@@ -126,7 +138,7 @@
 
                 <div class="section">
                     <h2>Events <span class="count-badge" id="event-count">0</span></h2>
-                    <div id="events-list" class="events-list">
+                    <div id="events-list" class="events-list" role="log" aria-live="polite" aria-label="Recent events">
                         <!-- Events will be added here -->
                     </div>
                 </div>
@@ -135,7 +147,7 @@
 
         <div class="visualization">
             <h2>Primitive Visualization <span class="hint">Click a primitive to select</span></h2>
-            <canvas id="primitives-canvas"></canvas>
+            <canvas id="primitives-canvas" role="img" aria-label="Primitive topology visualization"></canvas>
         </div>
     </div>
 
