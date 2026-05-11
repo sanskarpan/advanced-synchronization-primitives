@@ -49,6 +49,10 @@ type Config struct {
 	// SnapshotPath is the file used to persist primitive state across restarts.
 	// Empty string disables persistence.
 	SnapshotPath string
+
+	// DisableCompression disables permessage-deflate compression for WebSocket
+	// messages. Compression is enabled by default.
+	DisableCompression bool
 }
 
 // connState holds per-connection rate-limiting state.
@@ -177,6 +181,7 @@ func upgraderFor(cfg Config) websocket.Upgrader {
 	return websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		EnableCompression: !cfg.DisableCompression,
 		CheckOrigin: func(r *http.Request) bool {
 			if len(cfg.AllowedOrigins) == 0 {
 				// Default: localhost only
