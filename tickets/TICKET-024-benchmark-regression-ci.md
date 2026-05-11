@@ -5,7 +5,10 @@
 **Estimate:** M (3 days)
 **Epic:** Scalability and Performance
 **Labels:** p2, sprint-13, ci, performance, benchmarks
-**Status:** TODO
+**Status:** SHIPPED
+
+**Tracking Note:** Implemented on `origin/main`. This ticket is retained as historical planning context; the design notes and checklists below may not match the final shipped implementation verbatim.
+
 
 ## Problem Statement
 
