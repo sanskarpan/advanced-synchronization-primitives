@@ -1298,6 +1298,60 @@ func TestHealthzIncludesCustomHistogramBuckets(t *testing.T) {
 	}
 }
 
+func TestAuditLogWritesEntriesAndHealthzIncludesDrops(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins:    []string{"*"},
+		AuditLogPath:      auditPath,
+		AuditLogMaxBytes:  1024 * 1024,
+		AuditLogKeepFiles: 2,
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	mux.HandleFunc("/healthz", srv.HandleHealthz)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "audit-mu", "name": "audit"})
+	drainUntilType(t, conn, "success")
+	sendMsg(t, conn, "deletePrimitive", map[string]string{"id": "audit-mu"})
+	drainUntilType(t, conn, "success")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("ReadFile(audit): %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "\"event\":\"primitive_created\"") {
+		t.Fatalf("expected primitive_created audit entry, got %s", text)
+	}
+	if !strings.Contains(text, "\"event\":\"primitive_deleted\"") {
+		t.Fatalf("expected primitive_deleted audit entry, got %s", text)
+	}
+
+	// healthz remains readable from the in-memory handler even when no entries were dropped.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	srv.HandleHealthz(rec, req)
+	var body map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode healthz: %v", err)
+	}
+	if _, ok := body["dropped_audit_events"]; !ok {
+		t.Fatalf("expected dropped_audit_events in healthz response")
+	}
+}
+
 func TestInvalidHistogramBucketsPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
