@@ -77,6 +77,12 @@ type contextKey string
 
 const contextKeyClaims contextKey = "jwtClaims"
 
+const (
+	RoleAdmin    = "admin"
+	RoleOperator = "operator"
+	RoleViewer   = "viewer"
+)
+
 // deltaState tracks per-connection snapshots for delta broadcasts.
 type deltaState struct {
 	lastPrimJSON      map[string]string
@@ -326,6 +332,7 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, http.StatusUnauthorized)
 			return
 		}
+		claims.Role = normalizeRole(claims.Role, true)
 		r = r.WithContext(context.WithValue(r.Context(), contextKeyClaims, claims))
 		slog.Info("WebSocket authenticated", "sub", claims.Sub, "role", claims.Role)
 	} else if s.cfg.APIKey != "" {
@@ -634,7 +641,7 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.writeMuMu.Unlock()
 
 	s.connStatesMu.Lock()
-	s.connStates[conn] = &connState{}
+	s.connStates[conn] = &connState{role: RoleAdmin}
 	s.connStatesMu.Unlock()
 
 	s.deltaStatesMu.Lock()
@@ -725,6 +732,10 @@ func (s *Server) seedDeltaState(conn *websocket.Conn, prims map[string]*schedule
 // handleMessage handles an incoming message from a client
 func (s *Server) handleMessage(conn *websocket.Conn, msg Message) {
 	slog.Info("Received message", "type", msg.Type)
+	if err := s.authorizeMessage(conn, msg.Type); err != nil {
+		s.sendError(conn, err.Error())
+		return
+	}
 
 	switch msg.Type {
 	case "createRWLock":
@@ -757,6 +768,60 @@ func (s *Server) handleMessage(conn *websocket.Conn, msg Message) {
 	default:
 		s.sendError(conn, fmt.Sprintf("Unknown message type: %s", msg.Type))
 	}
+}
+
+func normalizeRole(role string, authenticated bool) string {
+	if !authenticated {
+		return RoleAdmin
+	}
+	switch role {
+	case RoleAdmin, RoleOperator, RoleViewer:
+		return role
+	case "":
+		return RoleViewer
+	default:
+		slog.Warn("unknown role in JWT; defaulting to viewer", "role", role)
+		return RoleViewer
+	}
+}
+
+func (s *Server) roleForConn(conn *websocket.Conn) string {
+	s.connStatesMu.Lock()
+	cs, ok := s.connStates[conn]
+	s.connStatesMu.Unlock()
+	if !ok || cs == nil {
+		return RoleAdmin
+	}
+	switch cs.role {
+	case RoleAdmin, RoleOperator, RoleViewer:
+		return cs.role
+	case "":
+		return RoleAdmin
+	default:
+		slog.Warn("unknown connection role; defaulting to viewer", "role", cs.role)
+		return RoleViewer
+	}
+}
+
+func (s *Server) authorizeMessage(conn *websocket.Conn, msgType string) error {
+	role := s.roleForConn(conn)
+
+	switch msgType {
+	case "createRWLock", "createFairRWLock", "createSemaphore", "createMutex", "createCondVar", "createBarrier", "createWaitGroup", "createOnce", "createSingleflight":
+		if role != RoleAdmin {
+			return errors.New("forbidden: create operations require admin role")
+		}
+	case "deletePrimitive":
+		if role != RoleAdmin {
+			return errors.New("forbidden: delete operations require admin role")
+		}
+	case "primitiveOp":
+		if role == RoleViewer {
+			return errors.New("forbidden: operations not permitted for viewer role")
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) handleRequestFullRefresh(conn *websocket.Conn) {
