@@ -170,3 +170,31 @@ func TestMetricsGetAllMetrics(t *testing.T) {
 		t.Error("p2 missing from GetAllMetrics")
 	}
 }
+
+func TestMetricsCollectorCustomHistogramBuckets(t *testing.T) {
+	custom := []time.Duration{
+		10 * time.Microsecond,
+		100 * time.Microsecond,
+		1 * time.Millisecond,
+	}
+	mc := NewMetricsCollectorWithBuckets(custom)
+	mc.RegisterPrimitive("c1", "Mutex", "custom")
+
+	snap := mc.GetPrimitiveMetrics("c1")
+	if snap == nil {
+		t.Fatal("expected snapshot")
+	}
+	if got := len(snap.Histogram); got != len(custom)+1 {
+		t.Fatalf("expected %d histogram buckets (+Inf included), got %d", len(custom)+1, got)
+	}
+
+	gotBounds := mc.GetHistogramBoundaries()
+	if len(gotBounds) != len(custom) {
+		t.Fatalf("expected %d collector bounds, got %d", len(custom), len(gotBounds))
+	}
+	for i, d := range custom {
+		if gotBounds[i] != d.Nanoseconds() {
+			t.Fatalf("bound[%d]: expected %d, got %d", i, d.Nanoseconds(), gotBounds[i])
+		}
+	}
+}
