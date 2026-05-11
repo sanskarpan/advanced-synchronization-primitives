@@ -366,6 +366,55 @@ func TestWebSocketAuthQueryParamRejected(t *testing.T) {
 	}
 }
 
+func TestWebSocketCompressionEnabledByDefault(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	dialer := websocket.Dialer{EnableCompression: true}
+	conn, resp, err := dialer.Dial(u, nil)
+	if err != nil {
+		t.Fatalf("expected successful dial with compression enabled: %v", err)
+	}
+	defer conn.Close()
+	_ = readMsg(t, conn) // initialState
+
+	ext := strings.ToLower(resp.Header.Get("Sec-WebSocket-Extensions"))
+	if !strings.Contains(ext, "permessage-deflate") {
+		t.Fatalf("expected permessage-deflate negotiation, got header: %q", resp.Header.Get("Sec-WebSocket-Extensions"))
+	}
+}
+
+func TestWebSocketCompressionCanBeDisabled(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins:      []string{"*"},
+		DisableCompression:  true,
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	dialer := websocket.Dialer{EnableCompression: true}
+	conn, resp, err := dialer.Dial(u, nil)
+	if err != nil {
+		t.Fatalf("expected successful dial with server compression disabled: %v", err)
+	}
+	defer conn.Close()
+	_ = readMsg(t, conn) // initialState
+
+	ext := strings.ToLower(resp.Header.Get("Sec-WebSocket-Extensions"))
+	if strings.Contains(ext, "permessage-deflate") {
+		t.Fatalf("expected compression to be disabled, got header: %q", resp.Header.Get("Sec-WebSocket-Extensions"))
+	}
+}
+
 // TestWebSocketDefaultOriginValidation verifies localhost-only origin checks
 // reject attacker-controlled suffix domains and accept real loopback origins.
 func TestWebSocketDefaultOriginValidation(t *testing.T) {
