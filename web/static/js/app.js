@@ -14,12 +14,89 @@ class SyncPrimitivesApp {
 
         this.selectedPrimitive = null;
         this.animationFrame = 0;
+        this.themeKey = 'syncprim_theme';
+        this.canvasTheme = {};
+        this.typeColors = {};
         this.lastSequence = 0;
 
+        this.initTheme();
         this.initCanvas();
         this.connect();
         this.initEventListeners();
         this.startAnimation();
+    }
+
+    safeStorageGet(key) {
+        try {
+            return localStorage.getItem(key);
+        } catch (_) {
+            return null;
+        }
+    }
+
+    safeStorageSet(key, value) {
+        try {
+            localStorage.setItem(key, value);
+        } catch (_) {
+            // localStorage unavailable; keep in-memory theme only.
+        }
+    }
+
+    getPreferredTheme() {
+        const stored = this.safeStorageGet(this.themeKey);
+        if (stored === 'light' || stored === 'dark') return stored;
+        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    cssVar(name, fallback) {
+        const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        return v || fallback;
+    }
+
+    refreshThemeColors() {
+        this.canvasTheme = {
+            textPrimary: this.cssVar('--text-primary', '#333'),
+            textMuted: this.cssVar('--text-muted', '#999'),
+            textSecondary: this.cssVar('--text-secondary', '#666'),
+            textInverse: this.cssVar('--text-inverse', '#fff'),
+            track: this.cssVar('--surface-track', '#f5f5f5'),
+            blocked: this.cssVar('--danger', '#f44336'),
+            selected: this.cssVar('--warning', '#ffd700')
+        };
+        this.typeColors = {
+            'RWLock': this.cssVar('--type-rwlock', '#2196f3'),
+            'Semaphore': this.cssVar('--type-semaphore', '#9c27b0'),
+            'Mutex': this.cssVar('--type-mutex', '#4caf50'),
+            'CondVar': this.cssVar('--type-condvar', '#ff9800'),
+            'Barrier': this.cssVar('--type-barrier', '#e91e63'),
+            'WaitGroup': this.cssVar('--type-waitgroup', '#00bcd4'),
+            'Once': this.cssVar('--type-once', '#8bc34a'),
+            'Singleflight': this.cssVar('--type-singleflight', '#ff5722')
+        };
+    }
+
+    applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        const icon = document.getElementById('theme-icon');
+        if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀';
+        this.refreshThemeColors();
+        this.render();
+    }
+
+    toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme') || 'light';
+        const next = current === 'dark' ? 'light' : 'dark';
+        this.safeStorageSet(this.themeKey, next);
+        this.applyTheme(next);
+    }
+
+    initTheme() {
+        this.applyTheme(this.getPreferredTheme());
+        const media = window.matchMedia('(prefers-color-scheme: dark)');
+        media.addEventListener('change', (e) => {
+            const stored = this.safeStorageGet(this.themeKey);
+            if (!stored) this.applyTheme(e.matches ? 'dark' : 'light');
+        });
     }
 
     initCanvas() {
@@ -197,6 +274,10 @@ class SyncPrimitivesApp {
         const clearBtn = document.getElementById('clear-all-btn');
         if (clearBtn) {
             clearBtn.addEventListener('click', () => this.clearAll());
+        }
+        const themeToggle = document.getElementById('theme-toggle');
+        if (themeToggle) {
+            themeToggle.addEventListener('click', () => this.toggleTheme());
         }
 
         this.updatePrimitiveOptions();
@@ -468,7 +549,7 @@ class SyncPrimitivesApp {
 
         const primitives = Object.values(this.primitives);
         if (primitives.length === 0) {
-            ctx.fillStyle = '#999';
+            ctx.fillStyle = this.canvasTheme.textMuted;
             ctx.font = '16px sans-serif';
             ctx.textAlign = 'center';
             ctx.fillText('No primitives to visualize', canvas.width / 2, canvas.height / 2);
@@ -492,22 +573,13 @@ class SyncPrimitivesApp {
     }
 
     drawPrimitiveBox(ctx, prim, x, y, width, height) {
-        const colors = {
-            'RWLock': '#2196f3',
-            'Semaphore': '#9c27b0',
-            'Mutex': '#4caf50',
-            'CondVar': '#ff9800',
-            'Barrier': '#e91e63',
-            'WaitGroup': '#00bcd4',
-            'Once': '#8bc34a',
-            'Singleflight': '#ff5722'
-        };
+        const colors = this.typeColors;
 
         // Validate prim.Type against known set before any use
         const knownTypes = Object.keys(colors);
         const safeType = knownTypes.includes(prim.Type) ? prim.Type : 'Unknown';
 
-        const color = colors[safeType] || '#666';
+        const color = colors[safeType] || this.canvasTheme.textSecondary;
         const isSelected = this.selectedPrimitive === prim.ID;
 
         // Animated glow effect
@@ -537,13 +609,13 @@ class SyncPrimitivesApp {
         ctx.fillRect(x, y, width, 30);
 
         // fillText is safe — canvas does not parse HTML
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = this.canvasTheme.textInverse;
         ctx.font = 'bold 14px Arial';
         ctx.textAlign = 'center';
         ctx.fillText(safeType, x + width / 2, y + 20);
 
         // Draw name — fillText is safe
-        ctx.fillStyle = '#333';
+        ctx.fillStyle = this.canvasTheme.textPrimary;
         ctx.font = '13px Arial';
         ctx.fillText(prim.Name, x + width / 2, y + 50);
 
@@ -556,7 +628,7 @@ class SyncPrimitivesApp {
         // Draw blocked count with animation
         if (prim.BlockedCount > 0) {
             const badgeSize = 24 + Math.sin(this.animationFrame * 0.1) * 2;
-            ctx.fillStyle = '#f44336';
+            ctx.fillStyle = this.canvasTheme.blocked;
             ctx.beginPath();
             ctx.arc(x + width - 20, y + height - 20, badgeSize / 2, 0, 2 * Math.PI);
             ctx.fill();
@@ -569,7 +641,7 @@ class SyncPrimitivesApp {
 
         // Draw selection indicator
         if (isSelected) {
-            ctx.strokeStyle = '#ffd700';
+            ctx.strokeStyle = this.canvasTheme.selected;
             ctx.lineWidth = 2;
             ctx.setLineDash([5, 5]);
             ctx.strokeRect(x - 3, y - 3, width + 6, height + 6);
@@ -585,7 +657,7 @@ class SyncPrimitivesApp {
 
         const goroutines = Object.values(this.goroutines);
         if (goroutines.length === 0) {
-            ctx.fillStyle = '#999';
+            ctx.fillStyle = this.canvasTheme.textMuted;
             ctx.font = '14px sans-serif';
             ctx.textAlign = 'center';
             ctx.fillText('No goroutines', canvas.width / 2, canvas.height / 2);
@@ -600,31 +672,31 @@ class SyncPrimitivesApp {
             const y = padding + index * (barHeight + padding);
 
             // Draw background
-            ctx.fillStyle = '#f5f5f5';
+            ctx.fillStyle = this.canvasTheme.track;
             ctx.fillRect(0, y, canvas.width, barHeight);
 
             // Draw state bar
             const colors = {
-                'Running': '#4caf50',
-                'Blocked': '#f44336',
-                'Waiting': '#ff9800',
-                'Finished': '#9e9e9e'
+                'Running': this.cssVar('--success', '#4caf50'),
+                'Blocked': this.cssVar('--danger', '#f44336'),
+                'Waiting': this.cssVar('--warning', '#ff9800'),
+                'Finished': this.cssVar('--text-muted', '#9e9e9e')
             };
 
             const barWidth = canvas.width * 0.85;
             const animatedWidth = g.State === 'Running' ?
                 barWidth * (0.9 + Math.sin(this.animationFrame * 0.1 + index) * 0.1) : barWidth;
 
-            ctx.fillStyle = colors[g.State] || '#666';
+            ctx.fillStyle = colors[g.State] || this.canvasTheme.textSecondary;
             ctx.fillRect(0, y, animatedWidth, barHeight);
 
             // fillText is safe for canvas
-            ctx.fillStyle = g.State === 'Finished' ? '#666' : 'white';
+            ctx.fillStyle = g.State === 'Finished' ? this.canvasTheme.textSecondary : this.canvasTheme.textInverse;
             ctx.font = 'bold 12px sans-serif';
             ctx.textAlign = 'left';
             ctx.fillText(g.Name, 8, y + 17);
 
-            ctx.fillStyle = '#333';
+            ctx.fillStyle = this.canvasTheme.textPrimary;
             ctx.textAlign = 'right';
             ctx.fillText(g.State, canvas.width - 8, y + 17);
         });
