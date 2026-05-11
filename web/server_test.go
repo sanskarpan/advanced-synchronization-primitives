@@ -3,6 +3,7 @@ package web_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -796,6 +797,70 @@ func TestWebSocketConnectionCap(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got: %v", resp)
+	}
+}
+
+func TestWebSocketOpRateLimit(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "rl-mu", "name": "rl-mu"})
+	drainUntilType(t, conn, "success")
+
+	// 50 ops/s allowed; burst above that should produce at least one op-limit error.
+	for i := 0; i < 60; i++ {
+		sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+			"id": "rl-mu", "op": "unlock", "holdMs": 1,
+		})
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	found := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "error" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		if strings.Contains(fmt.Sprint(payload["message"]), "operation rate limit exceeded") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected operation rate-limit error but none observed")
+	}
+}
+
+func TestShutdownRejectsNewConnections(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{AllowedOrigins: []string{"*"}})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown failed: %v", err)
+	}
+
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	_, resp, err := websocket.DefaultDialer.Dial(u, nil)
+	if err == nil {
+		t.Fatal("expected new connection to fail during/after shutdown")
+	}
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 while draining/shutdown, got: %v", resp)
 	}
 }
 
