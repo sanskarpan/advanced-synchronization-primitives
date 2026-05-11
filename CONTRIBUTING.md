@@ -93,6 +93,10 @@ make bench
 # equivalent: go test -bench=. -benchmem -timeout 120s ./internal/primitives/
 ```
 
+On pull requests, CI also runs benchmark comparison against the latest `main`
+baseline using `benchstat`. Regressions greater than 20% in `ns/op` fail the
+benchmark-comparison gate.
+
 To compare benchmarks before and after your change:
 
 ```bash
@@ -293,7 +297,7 @@ Maintainers aim to provide first-pass review within 5 business days. If your PR 
 | Coverage gate | Total coverage ≥ 70% (enforced by `make coverage` in CI) |
 | New code coverage | Every new function or method must have at least one direct test |
 | Fuzz corpus | If fixing a parser or state machine bug, add a seed to the relevant fuzz corpus |
-| Benchmark regression | For hot-path changes, include `benchstat` output showing no regression (>10% slowdown needs justification) |
+| Benchmark regression | For hot-path changes, include `benchstat` output showing no regression (>20% slowdown fails CI unless baseline is unavailable) |
 | Race test iterations | CI runs `-count=3`; locally you may run `-count=1` but must run `-count=3` before final submission |
 
 ### Writing Tests for Synchronization Code
