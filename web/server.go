@@ -1772,6 +1772,11 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			connCtx = state.opCtx
 		}
 		s.connStatesMu.Unlock()
+		primitiveDeleted := func() bool {
+			cp.mu.RLock()
+			defer cp.mu.RUnlock()
+			return !cp.primExists(payload.ID)
+		}
 		holdCtx, holdCancel := contextWithEitherCancel(primitiveCtx, connCtx)
 		opCtxForBlocking, opCancel := context.WithTimeout(holdCtx, operationTimeout)
 		defer opCancel()
@@ -1828,6 +1833,11 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				if primitiveDeleted() {
+					rwlock.RUnlock()
+					sendBlockingErr(context.Canceled)
+					return
+				}
 				s.metricsCollector.RecordAcquire(internalID, rwlock.GetStats().CurrentReaders)
 				keepHoldCtx = true
 				go func() {
@@ -1848,6 +1858,11 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				if primitiveDeleted() {
+					fairrwlock.RUnlock()
+					sendBlockingErr(context.Canceled)
+					return
+				}
 				s.metricsCollector.RecordAcquire(internalID, fairrwlock.GetStats().CurrentReaders)
 				keepHoldCtx = true
 				go func() {
@@ -1874,6 +1889,11 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				if primitiveDeleted() {
+					fairrwlock.Unlock()
+					sendBlockingErr(context.Canceled)
+					return
+				}
 				s.metricsCollector.RecordAcquire(internalID, 1)
 				s.metricsCollector.RecordWait(internalID, time.Since(start), clampWaiterCount(fairrwlock.GetStats().WaitersQueued))
 				keepHoldCtx = true
@@ -1895,8 +1915,13 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				if primitiveDeleted() {
+					rwlock.Unlock()
+					sendBlockingErr(context.Canceled)
+					return
+				}
 				s.metricsCollector.RecordAcquire(internalID, 1)
-				s.metricsCollector.RecordWait(internalID, time.Since(start), int32(rwlock.GetStats().WritersWaiting))
+				s.metricsCollector.RecordWait(internalID, time.Since(start), clampWaiterCount(rwlock.GetStats().WritersWaiting))
 				keepHoldCtx = true
 				go func() {
 					defer holdCancel()
@@ -1916,8 +1941,13 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				if primitiveDeleted() {
+					mutex.Unlock()
+					sendBlockingErr(context.Canceled)
+					return
+				}
 				s.metricsCollector.RecordAcquire(internalID, 1)
-				s.metricsCollector.RecordWait(internalID, time.Since(start), int32(mutex.GetStats().WaitersQueued))
+				s.metricsCollector.RecordWait(internalID, time.Since(start), clampWaiterCount(mutex.GetStats().WaitersQueued))
 				keepHoldCtx = true
 				go func() {
 					defer holdCancel()
@@ -1958,8 +1988,13 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				return
 			}
 			s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+			if primitiveDeleted() {
+				_ = semaphore.Release()
+				sendBlockingErr(context.Canceled)
+				return
+			}
 			s.metricsCollector.RecordAcquire(internalID, semaphore.GetStats().CurrentCount)
-			s.metricsCollector.RecordWait(internalID, time.Since(start), int32(semaphore.GetStats().WaitersQueued))
+			s.metricsCollector.RecordWait(internalID, time.Since(start), clampWaiterCount(semaphore.GetStats().WaitersQueued))
 
 		case "release":
 			if semaphore == nil {
