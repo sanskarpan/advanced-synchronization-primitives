@@ -2,6 +2,7 @@ package primitives
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -32,13 +33,45 @@ type WaiterQueue struct {
 // themselves atomic.
 var waiterIDCounter atomic.Uint64
 
+var waiterPool = sync.Pool{
+	New: func() interface{} {
+		return &Waiter{
+			Ready: make(chan struct{}, 1),
+		}
+	},
+}
+
+func getWaiter() *Waiter {
+	w := waiterPool.Get().(*Waiter)
+	// Drain any stale signal from a previous lifecycle.
+	select {
+	case <-w.Ready:
+	default:
+	}
+	w.ID = waiterIDCounter.Add(1)
+	w.CreatedAt = time.Now()
+	w.cancelled.Store(false)
+	w.next.Store(nil)
+	return w
+}
+
+func putWaiter(w *Waiter) {
+	if w == nil {
+		return
+	}
+	// Best-effort drain before returning to pool.
+	select {
+	case <-w.Ready:
+	default:
+	}
+	w.cancelled.Store(false)
+	w.next.Store(nil)
+	waiterPool.Put(w)
+}
+
 // NewWaiter creates a new waiter
 func NewWaiter() *Waiter {
-	return &Waiter{
-		ID:        waiterIDCounter.Add(1),
-		Ready:     make(chan struct{}, 1),
-		CreatedAt: time.Now(),
-	}
+	return getWaiter()
 }
 
 // NewWaiterQueue creates a new waiter queue with a sentinel node.
@@ -104,6 +137,7 @@ func (q *WaiterQueue) Dequeue() *Waiter {
 			// Skip cancelled waiters: if this waiter cancelled itself, discard
 			// and loop to get the next one.
 			if item.cancelled.Load() {
+				putWaiter(item)
 				continue
 			}
 			return item
