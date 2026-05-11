@@ -149,6 +149,144 @@ func TestWebSocketConnect(t *testing.T) {
 	}
 }
 
+func TestWebSocketDeltaUpdateOnlyChangedPrimitives(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-delta-1", "name": "delta-1"})
+	drainUntilType(t, conn, "success")
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-delta-2", "name": "delta-2"})
+	drainUntilType(t, conn, "success")
+
+	// Wait for a baseline delta tick that includes both newly created primitives.
+	deadline := time.Now().Add(4 * time.Second)
+	seenBothCreated := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		prims, _ := payload["Primitives"].(map[string]interface{})
+		if prims == nil {
+			continue
+		}
+		_, has1 := prims["mu-delta-1"]
+		_, has2 := prims["mu-delta-2"]
+		if has1 && has2 {
+			seenBothCreated = true
+			break
+		}
+	}
+	if !seenBothCreated {
+		t.Fatal("did not observe baseline update containing both created primitives")
+	}
+
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-delta-1", "op": "lock", "holdMs": 1,
+	})
+	drainUntilType(t, conn, "success")
+
+	deadline = time.Now().Add(4 * time.Second)
+	foundChangedOnly := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		prims, _ := payload["Primitives"].(map[string]interface{})
+		if prims == nil || len(prims) != 1 {
+			continue
+		}
+		if _, ok := prims["mu-delta-1"]; ok {
+			if _, exists := prims["mu-delta-2"]; exists {
+				t.Fatalf("expected delta update to exclude unchanged primitive mu-delta-2")
+			}
+			foundChangedOnly = true
+			break
+		}
+	}
+	if !foundChangedOnly {
+		t.Fatal("did not observe delta update containing only changed primitive")
+	}
+
+	sendMsg(t, conn, "deletePrimitive", map[string]string{"id": "mu-delta-2"})
+	drainUntilType(t, conn, "success")
+
+	deadline = time.Now().Add(4 * time.Second)
+	foundDeletion := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		deleted, _ := payload["Deleted"].([]interface{})
+		for _, item := range deleted {
+			if id, ok := item.(string); ok && id == "mu-delta-2" {
+				foundDeletion = true
+				break
+			}
+		}
+		if foundDeletion {
+			break
+		}
+	}
+	if !foundDeletion {
+		t.Fatal("expected delta update to include deleted primitive id")
+	}
+}
+
+func TestWebSocketRequestFullRefresh(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-refresh-1", "name": "refresh"})
+	drainUntilType(t, conn, "success")
+
+	sendMsg(t, conn, "requestFullRefresh", map[string]interface{}{})
+	stateMsg := drainUntilType(t, conn, "state")
+	payload, _ := stateMsg["payload"].(map[string]interface{})
+	if payload == nil {
+		t.Fatal("expected state payload")
+	}
+	prims, _ := payload["primitives"].(map[string]interface{})
+	if prims == nil {
+		t.Fatalf("expected state payload to include primitives, got %#v", payload)
+	}
+	if _, ok := prims["mu-refresh-1"]; !ok {
+		t.Fatalf("expected full refresh state to include mu-refresh-1")
+	}
+
+	sendMsg(t, conn, "requestFullRefresh", map[string]interface{}{})
+	errMsg := drainUntilType(t, conn, "error")
+	errPayload, _ := errMsg["payload"].(map[string]interface{})
+	if errPayload == nil {
+		t.Fatal("expected error payload")
+	}
+	if !strings.Contains(fmt.Sprint(errPayload["message"]), "full refresh rate limit exceeded") {
+		t.Fatalf("expected full refresh rate-limit error, got %v", errPayload["message"])
+	}
+}
+
 // TestWebSocketCreateRWLock verifies createRWLock returns success.
 func TestWebSocketCreateRWLock(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
@@ -392,8 +530,8 @@ func TestWebSocketCompressionEnabledByDefault(t *testing.T) {
 
 func TestWebSocketCompressionCanBeDisabled(t *testing.T) {
 	srv := web.NewServerWithConfig(web.Config{
-		AllowedOrigins:      []string{"*"},
-		DisableCompression:  true,
+		AllowedOrigins:     []string{"*"},
+		DisableCompression: true,
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.HandleWebSocket)

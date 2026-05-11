@@ -63,6 +63,12 @@ type connState struct {
 	mu       sync.Mutex
 }
 
+// deltaState tracks per-connection snapshots for delta broadcasts.
+type deltaState struct {
+	lastPrimJSON      map[string]string
+	lastFullRefreshAt time.Time
+}
+
 // primEntry holds a primitive's context alongside its cancel function.
 type primEntry struct {
 	ctx    context.Context
@@ -73,14 +79,14 @@ type primEntry struct {
 // connection. Isolation between connections is achieved by storing one
 // connPrims per conn instead of global maps on Server.
 type connPrims struct {
-	mu          sync.RWMutex
-	rwlocks     map[string]*primitives.RWLock
-	semaphores  map[string]*primitives.Semaphore
-	mutexes     map[string]*primitives.Mutex
-	condvars    map[string]*primitives.CondVar
-	barriers    map[string]*primitives.Barrier
-	waitgroups  map[string]*primitives.WaitGroup
-	onces       map[string]*primitives.Once
+	mu            sync.RWMutex
+	rwlocks       map[string]*primitives.RWLock
+	semaphores    map[string]*primitives.Semaphore
+	mutexes       map[string]*primitives.Mutex
+	condvars      map[string]*primitives.CondVar
+	barriers      map[string]*primitives.Barrier
+	waitgroups    map[string]*primitives.WaitGroup
+	onces         map[string]*primitives.Once
 	singleflights map[string]*primitives.Group
 
 	// primCtxs stores a ctx+cancel per primitive so that in-flight blocking
@@ -125,8 +131,8 @@ type Server struct {
 	metricsCollector *metrics.MetricsCollector
 
 	// Per-connection primitive maps (Fix 3).
-	connPrimsMap   map[*websocket.Conn]*connPrims
-	connPrimsMu    sync.RWMutex
+	connPrimsMap map[*websocket.Conn]*connPrims
+	connPrimsMu  sync.RWMutex
 
 	// WebSocket clients
 	clients   map[*websocket.Conn]bool
@@ -138,14 +144,20 @@ type Server struct {
 	connStates   map[*websocket.Conn]*connState
 	connStatesMu sync.Mutex
 
+	// Per-connection delta-broadcast state.
+	deltaStates   map[*websocket.Conn]*deltaState
+	deltaStatesMu sync.Mutex
+
 	broadcast chan interface{}
 
 	// droppedBroadcasts counts how many broadcast sends were dropped due to
 	// a full channel. Increment and log when the broadcast channel is full.
 	droppedBroadcasts atomic.Int64
 	// rate-limit counters for observability.
-	msgRateLimitHits atomic.Int64
-	opRateLimitHits  atomic.Int64
+	msgRateLimitHits    atomic.Int64
+	opRateLimitHits     atomic.Int64
+	fullRefreshRequests atomic.Int64
+	updateSequence      atomic.Uint64
 
 	// Connection cap
 	maxConns    int
@@ -179,8 +191,8 @@ type Message struct {
 // upgraderFor returns a websocket.Upgrader configured with the given allowed origins.
 func upgraderFor(cfg Config) websocket.Upgrader {
 	return websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
+		ReadBufferSize:    1024,
+		WriteBufferSize:   1024,
 		EnableCompression: !cfg.DisableCompression,
 		CheckOrigin: func(r *http.Request) bool {
 			if len(cfg.AllowedOrigins) == 0 {
@@ -245,6 +257,7 @@ func NewServerWithConfig(cfg Config) *Server {
 		clients:          make(map[*websocket.Conn]bool),
 		writeMu:          make(map[*websocket.Conn]*sync.Mutex),
 		connStates:       make(map[*websocket.Conn]*connState),
+		deltaStates:      make(map[*websocket.Conn]*deltaState),
 		broadcast:        make(chan interface{}, 100),
 		stop:             make(chan struct{}),
 		shutdownCtx:      ctx,
@@ -559,6 +572,12 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.connStates[conn] = &connState{}
 	s.connStatesMu.Unlock()
 
+	s.deltaStatesMu.Lock()
+	s.deltaStates[conn] = &deltaState{
+		lastPrimJSON: make(map[string]string),
+	}
+	s.deltaStatesMu.Unlock()
+
 	s.connPrimsMu.Lock()
 	s.connPrimsMap[conn] = newConnPrims()
 	s.connPrimsMu.Unlock()
@@ -580,6 +599,10 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 	delete(s.connStates, conn)
 	s.connStatesMu.Unlock()
 
+	s.deltaStatesMu.Lock()
+	delete(s.deltaStates, conn)
+	s.deltaStatesMu.Unlock()
+
 	s.connPrimsMu.Lock()
 	delete(s.connPrimsMap, conn)
 	s.connPrimsMu.Unlock()
@@ -592,17 +615,38 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 
 // sendInitialState sends the initial state to a client
 func (s *Server) sendInitialState(conn *websocket.Conn) {
+	prims := s.scheduler.GetPrimitives()
+	s.seedDeltaState(conn, prims)
+
 	state := map[string]interface{}{
-		"primitives": s.scheduler.GetPrimitives(),
+		"primitives": prims,
 		"goroutines": s.scheduler.GetGoroutines(),
 		"events":     s.scheduler.GetEvents(100),
 		"metrics":    s.scheduler.GetMetrics(),
+		"sequence":   s.updateSequence.Load(),
 	}
 
 	s.sendToClient(conn, Message{
 		Type:    "initialState",
 		Payload: jsonMarshal(state),
 	})
+}
+
+// seedDeltaState records a full snapshot baseline for delta broadcasts.
+func (s *Server) seedDeltaState(conn *websocket.Conn, prims map[string]*scheduler.PrimitiveInfo) {
+	s.deltaStatesMu.Lock()
+	ds, ok := s.deltaStates[conn]
+	if !ok {
+		ds = &deltaState{lastPrimJSON: make(map[string]string)}
+		s.deltaStates[conn] = ds
+	}
+
+	seed := make(map[string]string, len(prims))
+	for id, prim := range prims {
+		seed[id] = primitiveSnapshotKey(prim)
+	}
+	ds.lastPrimJSON = seed
+	s.deltaStatesMu.Unlock()
 }
 
 // handleMessage handles an incoming message from a client
@@ -633,9 +677,50 @@ func (s *Server) handleMessage(conn *websocket.Conn, msg Message) {
 	// Operation messages from the frontend buttons
 	case "primitiveOp":
 		s.handlePrimitiveOp(conn, msg)
+	case "requestFullRefresh":
+		s.handleRequestFullRefresh(conn)
 	default:
 		s.sendError(conn, fmt.Sprintf("Unknown message type: %s", msg.Type))
 	}
+}
+
+func (s *Server) handleRequestFullRefresh(conn *websocket.Conn) {
+	const minInterval = time.Second
+
+	now := time.Now()
+	s.deltaStatesMu.Lock()
+	ds, ok := s.deltaStates[conn]
+	if !ok {
+		ds = &deltaState{lastPrimJSON: make(map[string]string)}
+		s.deltaStates[conn] = ds
+	}
+	if !ds.lastFullRefreshAt.IsZero() && now.Sub(ds.lastFullRefreshAt) < minInterval {
+		s.deltaStatesMu.Unlock()
+		s.sendError(conn, "full refresh rate limit exceeded: max 1 request/second")
+		return
+	}
+	ds.lastFullRefreshAt = now
+	s.deltaStatesMu.Unlock()
+
+	s.fullRefreshRequests.Add(1)
+	s.sendState(conn)
+}
+
+func (s *Server) sendState(conn *websocket.Conn) {
+	prims := s.scheduler.GetPrimitives()
+	s.seedDeltaState(conn, prims)
+
+	state := map[string]interface{}{
+		"primitives": prims,
+		"goroutines": s.scheduler.GetGoroutines(),
+		"events":     s.scheduler.GetEvents(100),
+		"metrics":    s.scheduler.GetMetrics(),
+		"sequence":   s.updateSequence.Load(),
+	}
+	s.sendToClient(conn, Message{
+		Type:    "state",
+		Payload: jsonMarshal(state),
+	})
 }
 
 // connPrimsFor returns the per-connection primitive store for conn, or nil if
@@ -1084,9 +1169,9 @@ func (s *Server) handleGetMetrics(conn *websocket.Conn, msg Message) {
 // maxIDLen and maxNameLen are upper bounds for primitive identifiers and names.
 // Enforced on every create handler to prevent memory-exhaustion via oversized strings.
 const (
-	maxIDLen    = 256
-	maxNameLen  = 256
-	holdMsMax   = 3_600_000
+	maxIDLen      = 256
+	maxNameLen    = 256
+	holdMsMax     = 3_600_000
 	holdMsDefault = 100
 )
 
@@ -1456,6 +1541,18 @@ func (s *Server) broadcastMessages() {
 			}
 			s.clientsMu.RUnlock()
 
+			if update, ok := msg.(*scheduler.SchedulerUpdate); ok {
+				sequence := s.updateSequence.Add(1)
+				for _, conn := range clients {
+					payload := s.buildDeltaUpdatePayload(conn, update, sequence)
+					s.sendToClient(conn, Message{
+						Type:    "update",
+						Payload: jsonMarshal(payload),
+					})
+				}
+				continue
+			}
+
 			for _, conn := range clients {
 				s.sendToClient(conn, Message{
 					Type:    "update",
@@ -1464,6 +1561,77 @@ func (s *Server) broadcastMessages() {
 			}
 		}
 	}
+}
+
+type deltaUpdatePayload struct {
+	Primitives map[string]*scheduler.PrimitiveInfo `json:"Primitives"`
+	Deleted    []string                            `json:"Deleted,omitempty"`
+	Goroutines map[uint64]*scheduler.GoroutineInfo `json:"Goroutines"`
+	Events     []scheduler.Event                   `json:"Events"`
+	Metrics    scheduler.SchedulerMetrics          `json:"Metrics"`
+	Sequence   uint64                              `json:"Sequence"`
+}
+
+func (s *Server) buildDeltaUpdatePayload(conn *websocket.Conn, update *scheduler.SchedulerUpdate, sequence uint64) deltaUpdatePayload {
+	changed := make(map[string]*scheduler.PrimitiveInfo)
+	deleted := make([]string, 0)
+
+	s.deltaStatesMu.Lock()
+	ds, ok := s.deltaStates[conn]
+	if !ok {
+		ds = &deltaState{lastPrimJSON: make(map[string]string)}
+		s.deltaStates[conn] = ds
+	}
+
+	for id, prim := range update.Primitives {
+		snapshot := primitiveSnapshotKey(prim)
+		if prev, exists := ds.lastPrimJSON[id]; !exists || prev != snapshot {
+			changed[id] = prim
+			ds.lastPrimJSON[id] = snapshot
+		}
+	}
+
+	for id := range ds.lastPrimJSON {
+		if _, exists := update.Primitives[id]; exists {
+			continue
+		}
+		deleted = append(deleted, id)
+		delete(ds.lastPrimJSON, id)
+	}
+	s.deltaStatesMu.Unlock()
+
+	return deltaUpdatePayload{
+		Primitives: changed,
+		Deleted:    deleted,
+		Goroutines: update.Goroutines,
+		Events:     update.Events,
+		Metrics:    update.Metrics,
+		Sequence:   sequence,
+	}
+}
+
+// primitiveSnapshotKey normalizes a primitive into a stable string key used
+// for delta comparisons. It excludes volatile stats fields such as Age so
+// idle primitives are not treated as changed on every tick.
+func primitiveSnapshotKey(prim *scheduler.PrimitiveInfo) string {
+	data, err := json.Marshal(prim)
+	if err != nil {
+		return ""
+	}
+	var asMap map[string]interface{}
+	if err := json.Unmarshal(data, &asMap); err != nil {
+		return string(data)
+	}
+	if statsAny, ok := asMap["Stats"]; ok {
+		if statsMap, ok := statsAny.(map[string]interface{}); ok {
+			delete(statsMap, "Age")
+		}
+	}
+	normalized, err := json.Marshal(asMap)
+	if err != nil {
+		return string(data)
+	}
+	return string(normalized)
 }
 
 // forwardSchedulerUpdates forwards scheduler updates to broadcast channel
@@ -1576,8 +1744,8 @@ const snapshotVersion = 1
 
 // snapshotFile is the top-level structure written to disk.
 type snapshotFile struct {
-	Version    int                  `json:"version"`
-	Primitives []primitiveSnapshot  `json:"primitives"`
+	Version    int                 `json:"version"`
+	Primitives []primitiveSnapshot `json:"primitives"`
 }
 
 // legacyPrimitiveSnapshot is the historical unversioned on-disk format where
