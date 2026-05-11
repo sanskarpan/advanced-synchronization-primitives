@@ -100,6 +100,11 @@ func TestCondVarWaitTimeout(t *testing.T) {
 	if elapsed < 90*time.Millisecond {
 		t.Errorf("Timeout too short: %v", elapsed)
 	}
+
+	stats := cv.GetStats()
+	if stats.TotalWaitTimeNs <= 0 {
+		t.Fatalf("expected timeout wait to contribute to total wait time, got %d", stats.TotalWaitTimeNs)
+	}
 }
 
 func TestCondVarProducerConsumer(t *testing.T) {
@@ -242,5 +247,29 @@ func TestCondVarStringMethod(t *testing.T) {
 	s := cv.GetStats().String()
 	if s == "" {
 		t.Error("expected non-empty String()")
+	}
+}
+
+func TestCondVarWaitTimeoutSignaledPathRecordsElapsed(t *testing.T) {
+	m := NewMutex()
+	cv := NewCondVar()
+
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cv.Signal()
+		close(done)
+	}()
+
+	m.Lock()
+	signaled := cv.WaitTimeout(m, time.Second)
+	m.Unlock()
+	<-done
+
+	if !signaled {
+		t.Fatal("expected signal, got timeout")
+	}
+	if cv.GetStats().TotalWaitTimeNs <= 0 {
+		t.Fatal("expected non-zero elapsed time for signaled path")
 	}
 }
