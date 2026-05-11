@@ -51,11 +51,12 @@ func New(path string, maxBytes int64, keepFiles int) (*Logger, error) {
 	if keepFiles < 0 {
 		keepFiles = 0
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("audit: mkdir: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+	// #nosec G304 -- path is server-controlled configuration
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open file: %w", err)
 	}
@@ -186,7 +187,7 @@ func (l *Logger) rotateLocked() error {
 		}
 	}
 
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
