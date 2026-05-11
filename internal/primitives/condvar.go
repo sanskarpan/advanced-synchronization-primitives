@@ -231,13 +231,12 @@ func (cv *CondVar) WaitTimeout(m *Mutex, timeout time.Duration) bool {
 	// Wait for signal or timeout
 	signaled := waiter.WaitTimeout(timeout)
 
-	if signaled {
-		waitTime := time.Since(startTime).Nanoseconds()
-		cv.totalWaitTime.Add(waitTime)
-	} else {
+	if !signaled {
 		// Timed out: cancel the waiter so a future Signal/Broadcast skip it.
 		waiter.cancelled.Store(true)
 	}
+	waitTime := time.Since(startTime).Nanoseconds()
+	cv.totalWaitTime.Add(waitTime)
 
 	// Re-acquire the mutex
 	m.Lock()
