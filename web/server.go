@@ -53,6 +53,10 @@ type Config struct {
 	// DisableCompression disables permessage-deflate compression for WebSocket
 	// messages. Compression is enabled by default.
 	DisableCompression bool
+
+	// HistogramBuckets configures wait-duration histogram bucket upper bounds.
+	// Nil/empty uses defaults.
+	HistogramBuckets []time.Duration
 }
 
 // connState holds per-connection rate-limiting state.
@@ -231,6 +235,8 @@ func NewServer() *Server {
 
 // NewServerWithConfig creates a new web server with the given Config.
 func NewServerWithConfig(cfg Config) *Server {
+	validateHistogramBuckets(cfg.HistogramBuckets)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	maxConns := cfg.MaxConns
 	if maxConns <= 0 {
@@ -240,7 +246,7 @@ func NewServerWithConfig(cfg Config) *Server {
 	s := &Server{
 		cfg:              cfg,
 		scheduler:        scheduler.NewScheduler(),
-		metricsCollector: metrics.NewMetricsCollector(),
+		metricsCollector: metrics.NewMetricsCollectorWithBuckets(cfg.HistogramBuckets),
 		connPrimsMap:     make(map[*websocket.Conn]*connPrims),
 		clients:          make(map[*websocket.Conn]bool),
 		writeMu:          make(map[*websocket.Conn]*sync.Mutex),
@@ -525,12 +531,19 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 	m := s.scheduler.GetMetrics()
 	w.Header().Set("Content-Type", "application/json")
+	bounds := s.metricsCollector.GetHistogramBoundaries()
+	bucketStr := make([]string, 0, len(bounds))
+	for _, ns := range bounds {
+		bucketStr = append(bucketStr, time.Duration(ns).String())
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":             "ok",
 		"uptime_seconds":     m.Uptime.Seconds(),
 		"dropped_broadcasts": s.droppedBroadcasts.Load(),
 		"rate_limit_hits":    s.msgRateLimitHits.Load(),
 		"op_rate_limit_hits": s.opRateLimitHits.Load(),
+		"histogram_buckets":  bucketStr,
 	})
 }
 
@@ -1125,6 +1138,20 @@ func clampHoldMs(ms int) (time.Duration, string) {
 		return time.Duration(ms) * time.Millisecond, fmt.Sprintf("holdMs clamped from %d to %d", requested, ms)
 	}
 	return time.Duration(ms) * time.Millisecond, ""
+}
+
+func validateHistogramBuckets(buckets []time.Duration) {
+	if len(buckets) == 0 {
+		return
+	}
+	for i, b := range buckets {
+		if b <= 0 {
+			panic(fmt.Sprintf("invalid HistogramBuckets: bucket[%d]=%v must be positive", i, b))
+		}
+		if i > 0 && b <= buckets[i-1] {
+			panic(fmt.Sprintf("invalid HistogramBuckets: bucket[%d]=%v must be strictly greater than bucket[%d]=%v", i, b, i-1, buckets[i-1]))
+		}
+	}
 }
 
 // handlePrimitiveOp handles operation requests from the frontend buttons.
