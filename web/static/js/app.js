@@ -298,6 +298,20 @@ class SyncPrimitivesApp {
             });
         }
 
+        const createBtn = document.getElementById('create-btn');
+        if (createBtn) {
+            createBtn.addEventListener('click', () => this.createPrimitive());
+        }
+
+        const primitiveNameInput = document.getElementById('primitive-name');
+        if (primitiveNameInput) {
+            primitiveNameInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    this.createPrimitive();
+                }
+            });
+        }
+
         // Stress test button
         const stressBtn = document.getElementById('stress-test-btn');
         if (stressBtn) {
@@ -347,6 +361,7 @@ class SyncPrimitivesApp {
     }
 
     render() {
+        this.updateCounts();
         this.renderPrimitivesList();
         this.renderGoroutinesList();
         this.renderEventsList();
@@ -354,6 +369,18 @@ class SyncPrimitivesApp {
         this.renderPrimitivesCanvas();
         this.renderGoroutinesCanvas();
         this.renderDetailedStats();
+    }
+
+    updateCounts() {
+        const primCount = document.getElementById('prim-count');
+        if (primCount) {
+            primCount.textContent = String(Object.keys(this.primitives).length);
+        }
+
+        const eventCount = document.getElementById('event-count');
+        if (eventCount) {
+            eventCount.textContent = String(this.events.length);
+        }
     }
 
     renderPrimitivesList() {
@@ -930,10 +957,12 @@ function clearInlineError(inputId) {
     if (errEl) errEl.textContent = '';
 }
 
-// Global functions
-function createPrimitive() {
+// Initialize app
+const app = new SyncPrimitivesApp();
+
+app.createPrimitive = function() {
     const type = document.getElementById('primitive-type').value;
-    const name = document.getElementById('primitive-name').value;
+    const name = document.getElementById('primitive-name').value.trim();
 
     if (!name) {
         alert('Please enter a name');
@@ -979,14 +1008,9 @@ function createPrimitive() {
 
     app.send(messageTypes[type], payload);
 
-    // Clear input
     document.getElementById('primitive-name').value = '';
-}
+};
 
-// Initialize app
-const app = new SyncPrimitivesApp();
-
-// Make deletePrimitive global
 app.deletePrimitive = function(id) {
     this.send('deletePrimitive', { id });
 };

@@ -5,7 +5,10 @@
 **Estimate:** L (1–2 weeks)
 **Epic:** Advanced Primitive Features
 **Labels:** p2, sprint-5, primitives, performance, fairness
-**Status:** TODO
+**Status:** SHIPPED
+
+**Tracking Note:** Implemented on `origin/main`. This ticket is retained as historical planning context; the design notes and checklists below may not match the final shipped implementation verbatim.
+
 
 ## Problem Statement
 

@@ -5,7 +5,10 @@
 **Estimate:** L (1–2 weeks)
 **Epic:** Developer Experience
 **Labels:** p2, sprint-7, sdk, client, developer-experience
-**Status:** TODO
+**Status:** SHIPPED
+
+**Tracking Note:** Implemented on `origin/main`. This ticket is retained as historical planning context; the design notes and checklists below may not match the final shipped implementation verbatim.
+
 
 ## Problem Statement
 

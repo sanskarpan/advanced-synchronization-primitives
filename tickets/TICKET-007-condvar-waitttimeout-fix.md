@@ -5,7 +5,10 @@
 **Estimate:** S (1 day)
 **Epic:** Observability and Reliability
 **Labels:** p1, sprint-2, bug, primitives, metrics, observability
-**Status:** TODO
+**Status:** SHIPPED
+
+**Tracking Note:** Implemented on `origin/main`. This ticket is retained as historical planning context; the design notes and checklists below may not match the final shipped implementation verbatim.
+
 
 ## Problem Statement
 
