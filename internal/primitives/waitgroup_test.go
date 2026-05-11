@@ -2,6 +2,8 @@ package primitives
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -91,12 +93,37 @@ func TestWaitGroupConcurrent(t *testing.T) {
 
 func TestWaitGroupNegativePanics(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		r := recover()
+		if r == nil {
 			t.Error("expected panic on negative counter")
+			return
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "negative counter") ||
+			!strings.Contains(msg, "Done") ||
+			!strings.Contains(msg, "counter=-1") {
+			t.Fatalf("unexpected panic message: %q", msg)
 		}
 	}()
 	wg := NewWaitGroup()
 	wg.Done() // counter = -1 → panic
+}
+
+func TestWaitGroupNegativeAddPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic on negative Add")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "negative counter") ||
+			!strings.Contains(msg, "delta=-1") ||
+			!strings.Contains(msg, "counter=-1") {
+			t.Fatalf("unexpected panic message: %q", msg)
+		}
+	}()
+	wg := NewWaitGroup()
+	wg.Add(-1)
 }
 
 func TestWaitGroupWaitContext(t *testing.T) {
