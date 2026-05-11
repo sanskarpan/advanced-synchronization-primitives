@@ -1108,6 +1108,20 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if _, err := os.Stat(snapshotPath); err != nil {
 		t.Fatalf("snapshot file missing after shutdown: %v", err)
 	}
+	// Verify the file is versioned.
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	var snap struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("parse snapshot: %v", err)
+	}
+	if snap.Version != 1 {
+		t.Fatalf("expected snapshot version 1, got %d", snap.Version)
+	}
 
 	// --- Phase 2: new server, same snapshotPath, verify restore ---
 	srv2 := web.NewServerWithConfig(web.Config{
@@ -1124,6 +1138,77 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		if _, ok := prims2[id]; !ok {
 			t.Errorf("server2: primitive %q not restored from snapshot", id)
 		}
+	}
+}
+
+func TestSnapshotLegacyFormatBackwardCompatibility(t *testing.T) {
+	snapshotPath := filepath.Join(t.TempDir(), "legacy-snapshot.json")
+	legacy := map[string]map[string]interface{}{
+		"legacy-mu-1": {
+			"type": "Mutex",
+			"name": "LegacyMutex",
+		},
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy snapshot: %v", err)
+	}
+	if err := os.WriteFile(snapshotPath, data, 0o600); err != nil {
+		t.Fatalf("write legacy snapshot: %v", err)
+	}
+
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		SnapshotPath:   snapshotPath,
+	})
+	prims := srv.GetSchedulerPrimitives()
+	if _, ok := prims["legacy-mu-1"]; !ok {
+		t.Fatalf("legacy primitive was not restored")
+	}
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	// After save, file must be migrated to versioned format.
+	upgradedData, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read upgraded snapshot: %v", err)
+	}
+	var upgraded struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(upgradedData, &upgraded); err != nil {
+		t.Fatalf("parse upgraded snapshot: %v", err)
+	}
+	if upgraded.Version != 1 {
+		t.Fatalf("expected upgraded snapshot version 1, got %d", upgraded.Version)
+	}
+}
+
+func TestSnapshotFutureVersionSkipped(t *testing.T) {
+	snapshotPath := filepath.Join(t.TempDir(), "future-snapshot.json")
+	future := map[string]interface{}{
+		"version": 99,
+		"primitives": []map[string]interface{}{
+			{"id": "future-mu-1", "type": "Mutex", "name": "FutureMutex"},
+		},
+	}
+	data, err := json.MarshalIndent(future, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal future snapshot: %v", err)
+	}
+	if err := os.WriteFile(snapshotPath, data, 0o600); err != nil {
+		t.Fatalf("write future snapshot: %v", err)
+	}
+
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		SnapshotPath:   snapshotPath,
+	})
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	if _, ok := srv.GetSchedulerPrimitives()["future-mu-1"]; ok {
+		t.Fatal("future-version snapshot should have been skipped")
 	}
 }
 
