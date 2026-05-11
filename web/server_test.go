@@ -134,6 +134,9 @@ func TestHandleStaticOK(t *testing.T) {
 		`id="prim-count"`,
 		`id="event-count"`,
 		`id="theme-toggle"`,
+		`id="notification-root"`,
+		`id="namespace-badge"`,
+		`role="log"`,
 		`<script src="/js/app.js"></script>`,
 		`<link rel="stylesheet" href="/css/style.css">`,
 	} {
@@ -163,6 +166,9 @@ func TestHandleStaticServesEmbeddedAssets(t *testing.T) {
 				":root {",
 				"[data-theme=\"dark\"] {",
 				"color-scheme: dark;",
+				".status-meta {",
+				".field-error {",
+				".notification-root {",
 				".count-badge {",
 				".notification {",
 			},
@@ -174,6 +180,10 @@ func TestHandleStaticServesEmbeddedAssets(t *testing.T) {
 				"const app = new SyncPrimitivesApp();",
 				"this.themeKey = 'syncprim_theme';",
 				"window.matchMedia('(prefers-color-scheme: dark)')",
+				"message.payload.warning",
+				"this.setInteractiveState(false);",
+				"this.validateNamespace(nextNamespace || 'default')",
+				"Press \"Clear All\" again within 3 seconds to confirm.",
 				"this.updateCounts();",
 				"createBtn.addEventListener('click', () => this.createPrimitive());",
 			},
@@ -200,6 +210,14 @@ func TestHandleStaticServesEmbeddedAssets(t *testing.T) {
 			for _, want := range tc.snippets {
 				if !strings.Contains(body, want) {
 					t.Fatalf("GET %s: expected body to contain %q", tc.path, want)
+				}
+			}
+			if tc.path == "/js/app.js" {
+				if strings.Contains(body, "alert(") {
+					t.Fatalf("GET %s: expected dashboard JS to avoid alert()", tc.path)
+				}
+				if strings.Contains(body, "confirm(") {
+					t.Fatalf("GET %s: expected dashboard JS to avoid confirm()", tc.path)
 				}
 			}
 		})
