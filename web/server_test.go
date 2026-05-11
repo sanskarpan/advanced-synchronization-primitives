@@ -133,6 +133,7 @@ func TestHandleStaticOK(t *testing.T) {
 		`id="create-btn"`,
 		`id="prim-count"`,
 		`id="event-count"`,
+		`id="theme-toggle"`,
 		`<script src="/js/app.js"></script>`,
 		`<link rel="stylesheet" href="/css/style.css">`,
 	} {
@@ -160,6 +161,8 @@ func TestHandleStaticServesEmbeddedAssets(t *testing.T) {
 			contentType: "text/css",
 			snippets: []string{
 				":root {",
+				"[data-theme=\"dark\"] {",
+				"color-scheme: dark;",
 				".count-badge {",
 				".notification {",
 			},
@@ -169,6 +172,8 @@ func TestHandleStaticServesEmbeddedAssets(t *testing.T) {
 			contentType: "javascript",
 			snippets: []string{
 				"const app = new SyncPrimitivesApp();",
+				"this.themeKey = 'syncprim_theme';",
+				"window.matchMedia('(prefers-color-scheme: dark)')",
 				"this.updateCounts();",
 				"createBtn.addEventListener('click', () => this.createPrimitive());",
 			},
