@@ -15,9 +15,11 @@ class SyncPrimitivesApp {
         this.selectedPrimitive = null;
         this.animationFrame = 0;
         this.themeKey = 'syncprim_theme';
+        this.namespaceKey = 'syncprim_namespace';
         this.canvasTheme = {};
         this.typeColors = {};
         this.lastSequence = 0;
+        this.currentNamespace = this.getInitialNamespace();
 
         this.initTheme();
         this.initCanvas();
@@ -40,6 +42,24 @@ class SyncPrimitivesApp {
         } catch (_) {
             // localStorage unavailable; keep in-memory theme only.
         }
+    }
+
+    getInitialNamespace() {
+        const params = new URLSearchParams(window.location.search);
+        const fromURL = params.get('ns');
+        if (fromURL) return fromURL;
+        return this.safeStorageGet(this.namespaceKey) || 'default';
+    }
+
+    getNamespace() {
+        return (this.currentNamespace || 'default').trim() || 'default';
+    }
+
+    setNamespace(namespace) {
+        this.currentNamespace = (namespace || 'default').trim() || 'default';
+        this.safeStorageSet(this.namespaceKey, this.currentNamespace);
+        const input = document.getElementById('namespace-input');
+        if (input) input.value = this.currentNamespace;
     }
 
     getPreferredTheme() {
@@ -117,7 +137,8 @@ class SyncPrimitivesApp {
 
     connect() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const ns = encodeURIComponent(this.getNamespace());
+        const wsUrl = `${protocol}//${window.location.host}/ws?ns=${ns}`;
 
         this.updateStatus('connecting');
         this.ws = new WebSocket(wsUrl);
@@ -256,8 +277,26 @@ class SyncPrimitivesApp {
     }
 
     initEventListeners() {
+        this.setNamespace(this.getNamespace());
         const typeSelect = document.getElementById('primitive-type');
         typeSelect.addEventListener('change', () => this.updatePrimitiveOptions());
+
+        const namespaceInput = document.getElementById('namespace-input');
+        const namespaceApplyBtn = document.getElementById('namespace-apply-btn');
+        if (namespaceApplyBtn) {
+            namespaceApplyBtn.addEventListener('click', () => {
+                this.setNamespace(namespaceInput.value);
+                if (this.ws) this.ws.close();
+            });
+        }
+        if (namespaceInput) {
+            namespaceInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    this.setNamespace(namespaceInput.value);
+                    if (this.ws) this.ws.close();
+                }
+            });
+        }
 
         // Stress test button
         const stressBtn = document.getElementById('stress-test-btn');
