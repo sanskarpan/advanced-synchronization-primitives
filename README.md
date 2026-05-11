@@ -146,6 +146,44 @@ The dashboard lets you create primitives, perform operations, and watch goroutin
 
 ---
 
+## Go SDK
+
+The `pkg/client` package provides a typed WebSocket client for automation, tests, and external Go integrations.
+
+```go
+import (
+	"context"
+	"time"
+
+	"github.com/sanskar/syncprimitives/pkg/client"
+)
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+c := client.New(client.Config{
+	URL: "ws://localhost:8085/ws",
+})
+if err := c.Connect(ctx); err != nil {
+	panic(err)
+}
+defer c.Close()
+
+if err := c.CreateMutex(ctx, "job-lock", "job-lock"); err != nil {
+	panic(err)
+}
+if err := c.LockMutex(ctx, "job-lock", 250); err != nil {
+	panic(err)
+}
+if err := c.DeletePrimitive(ctx, "job-lock"); err != nil {
+	panic(err)
+}
+```
+
+The client serializes commands on a single connection, ignores broadcast `state` and `update` messages while waiting for acknowledgements, and supports Bearer API key authentication through `client.Config.APIKey`.
+
+---
+
 ## Installation
 
 ```bash
