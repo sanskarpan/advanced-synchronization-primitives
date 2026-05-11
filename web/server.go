@@ -604,6 +604,14 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 	s.deltaStatesMu.Unlock()
 
 	s.connPrimsMu.Lock()
+	if cp, ok := s.connPrimsMap[conn]; ok {
+		cp.primCtxsMu.Lock()
+		for id, entry := range cp.primCtxs {
+			entry.cancel()
+			delete(cp.primCtxs, id)
+		}
+		cp.primCtxsMu.Unlock()
+	}
 	delete(s.connPrimsMap, conn)
 	s.connPrimsMu.Unlock()
 
@@ -1173,6 +1181,7 @@ const (
 	maxNameLen    = 256
 	holdMsMax     = 3_600_000
 	holdMsDefault = 100
+	operationTimeout = time.Hour
 )
 
 // validatePrimID returns an error string when id is empty or exceeds maxIDLen.
@@ -1264,13 +1273,27 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 		// When the primitive is deleted, its cancel func is called which
 		// cancels this context, unblocking any goroutine waiting on it.
 		cp.primCtxsMu.Lock()
-		var opCtxForBlocking context.Context
+		var baseOpCtx context.Context
 		if entry, ok := cp.primCtxs[payload.ID]; ok {
-			opCtxForBlocking = entry.ctx
+			baseOpCtx = entry.ctx
 		} else {
-			opCtxForBlocking = s.shutdownCtx
+			baseOpCtx = s.shutdownCtx
 		}
 		cp.primCtxsMu.Unlock()
+		opCtxForBlocking, opCancel := context.WithTimeout(baseOpCtx, operationTimeout)
+		defer opCancel()
+
+		sendBlockingErr := func(err error) {
+			if errors.Is(err, context.DeadlineExceeded) {
+				s.sendError(conn, "operation timed out after 1 hour")
+				return
+			}
+			if baseOpCtx.Err() != nil {
+				s.sendError(conn, "primitive deleted while operation was in progress")
+				return
+			}
+			s.sendError(conn, "operation cancelled")
+		}
 
 		start := time.Now()
 
@@ -1284,17 +1307,16 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			blockStart := time.Now()
 			if err := rwlock.RLockContext(opCtxForBlocking); err != nil {
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				if opCtxForBlocking.Err() != nil {
-					s.sendError(conn, "primitive deleted while operation was in progress")
-				} else {
-					s.sendError(conn, "operation cancelled: server shutting down")
-				}
+				sendBlockingErr(err)
 				return
 			}
 			s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
 			s.metricsCollector.RecordAcquire(payload.ID, rwlock.GetStats().CurrentReaders)
 			go func() {
-				time.Sleep(holdDuration)
+				select {
+				case <-baseOpCtx.Done():
+				case <-time.After(holdDuration):
+				}
 				rwlock.RUnlock()
 				s.metricsCollector.RecordRelease(payload.ID, rwlock.GetStats().CurrentReaders)
 			}()
@@ -1305,18 +1327,17 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				blockStart := time.Now()
 				if err := rwlock.LockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-					if opCtxForBlocking.Err() != nil {
-						s.sendError(conn, "primitive deleted while operation was in progress")
-					} else {
-						s.sendError(conn, "operation cancelled: server shutting down")
-					}
+					sendBlockingErr(err)
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
 				s.metricsCollector.RecordAcquire(payload.ID, 1)
 				s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(rwlock.GetStats().WritersWaiting))
 				go func() {
-					time.Sleep(holdDuration)
+					select {
+					case <-baseOpCtx.Done():
+					case <-time.After(holdDuration):
+					}
 					rwlock.Unlock()
 					s.metricsCollector.RecordRelease(payload.ID, 0)
 				}()
@@ -1325,18 +1346,17 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				blockStart := time.Now()
 				if err := mutex.LockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-					if opCtxForBlocking.Err() != nil {
-						s.sendError(conn, "primitive deleted while operation was in progress")
-					} else {
-						s.sendError(conn, "operation cancelled: server shutting down")
-					}
+					sendBlockingErr(err)
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
 				s.metricsCollector.RecordAcquire(payload.ID, 1)
 				s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(mutex.GetStats().WaitersQueued))
 				go func() {
-					time.Sleep(holdDuration)
+					select {
+					case <-baseOpCtx.Done():
+					case <-time.After(holdDuration):
+					}
 					mutex.Unlock()
 					s.metricsCollector.RecordRelease(payload.ID, 0)
 				}()
@@ -1366,11 +1386,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			blockStart := time.Now()
 			if err := semaphore.AcquireContext(opCtxForBlocking); err != nil {
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				if opCtxForBlocking.Err() != nil {
-					s.sendError(conn, "primitive deleted while operation was in progress")
-				} else {
-					s.sendError(conn, "operation cancelled: server shutting down")
-				}
+				sendBlockingErr(err)
 				return
 			}
 			s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))

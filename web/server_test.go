@@ -662,6 +662,60 @@ func TestShutdownCancelsBlockedOp(t *testing.T) {
 	ts.Close()
 }
 
+// TestDisconnectCancelsBlockedOp verifies that closing a client connection
+// cancels per-primitive contexts and unblocks waiting op goroutines.
+func TestDisconnectCancelsBlockedOp(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{AllowedOrigins: []string{"*"}})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	conn := dialWS(t, ts)
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-disc", "name": "disc"})
+	drainUntilType(t, conn, "success")
+
+	// Acquire and hold the lock.
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-disc", "op": "lock", "holdMs": 5000,
+	})
+	drainUntilType(t, conn, "success")
+
+	// Second lock attempt blocks.
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-disc", "op": "lock", "holdMs": 5000,
+	})
+
+	// Wait until blocked goroutine is observed.
+	blockDeadline := time.Now().Add(2 * time.Second)
+	blockedSeen := false
+	for time.Now().Before(blockDeadline) {
+		if srv.GetSchedulerMetrics().BlockedGoroutines > 0 {
+			blockedSeen = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !blockedSeen {
+		t.Fatal("expected blocked goroutine before disconnect")
+	}
+
+	// Disconnect client; blocked op should unblock via context cancellation.
+	conn.Close()
+
+	unblockDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(unblockDeadline) {
+		if srv.GetSchedulerMetrics().BlockedGoroutines == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("blocked goroutines did not drain after disconnect: %+v", srv.GetSchedulerMetrics())
+}
+
 // TestWebSocketUnlockNotLocked verifies that unlocking an unlocked mutex returns error.
 func TestWebSocketUnlockNotLocked(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
