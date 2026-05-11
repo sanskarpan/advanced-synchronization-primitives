@@ -5,6 +5,7 @@
 }
 
 :root {
+    color-scheme: light;
     --bg-gradient-start: #667eea;
     --bg-gradient-end: #764ba2;
     --surface: #ffffff;
@@ -22,6 +23,12 @@
     --warning: #ffc107;
     --border: #e0e0e0;
     --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    --focus-ring: 0 0 0 3px rgba(96, 165, 250, 0.2);
+    --button-shadow-hover: 0 6px 12px rgba(0, 0, 0, 0.2);
+    --notification-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+    --warning-glow: 0 4px 8px rgba(250, 204, 21, 0.35);
+    --tool-success-alt: #15803d;
+    --tool-danger-alt: #dc2626;
     --type-rwlock: #2196f3;
     --type-fairrwlock: #3f51b5;
     --type-semaphore: #9c27b0;
@@ -34,6 +41,7 @@
 }
 
 [data-theme="dark"] {
+    color-scheme: dark;
     --bg-gradient-start: #111827;
     --bg-gradient-end: #1f2937;
     --surface: #1f2937;
@@ -51,6 +59,12 @@
     --warning: #facc15;
     --border: #334155;
     --shadow: 0 4px 10px rgba(0, 0, 0, 0.45);
+    --focus-ring: 0 0 0 3px rgba(56, 189, 248, 0.22);
+    --button-shadow-hover: 0 8px 16px rgba(0, 0, 0, 0.38);
+    --notification-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+    --warning-glow: 0 4px 10px rgba(250, 204, 21, 0.28);
+    --tool-success-alt: #15803d;
+    --tool-danger-alt: #b91c1c;
     --type-rwlock: #60a5fa;
     --type-fairrwlock: #818cf8;
     --type-semaphore: #c084fc;
@@ -209,7 +223,7 @@ select, input[type="text"], input[type="number"] {
 select:focus, input:focus {
     outline: none;
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+    box-shadow: var(--focus-ring);
 }
 
 button {
@@ -226,7 +240,7 @@ button {
 
 button:hover {
     transform: translateY(-2px);
-    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--button-shadow-hover);
 }
 
 button:active {
@@ -234,11 +248,11 @@ button:active {
 }
 
 .tool-btn {
-    background: linear-gradient(135deg, var(--success) 0%, #15803d 100%);
+    background: linear-gradient(135deg, var(--success) 0%, var(--tool-success-alt) 100%);
 }
 
 .tool-btn.danger {
-    background: linear-gradient(135deg, var(--danger) 0%, #dc2626 100%);
+    background: linear-gradient(135deg, var(--danger) 0%, var(--tool-danger-alt) 100%);
 }
 
 .control-btn {
@@ -334,7 +348,7 @@ button:active {
 .primitive-item.selected {
     border-left-color: var(--warning);
     background: color-mix(in srgb, var(--warning) 18%, var(--surface) 82%);
-    box-shadow: 0 4px 8px rgba(250, 204, 21, 0.35);
+    box-shadow: var(--warning-glow);
 }
 
 .primitive-header {
@@ -555,7 +569,7 @@ canvas {
     background: var(--surface);
     padding: 15px 20px;
     border-radius: 8px;
-    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--notification-shadow);
     z-index: 1000;
     min-width: 300px;
     transition: right 0.3s ease;
