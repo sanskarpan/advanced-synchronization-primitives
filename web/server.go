@@ -1798,7 +1798,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				Op:          payload.Op,
 				HoldMs:      payload.HoldMs,
 				Result:      "success",
-				DurationNs:  time.Since(start).Nanoseconds(), // #nosec G115 -- stored in int64 field
+					DurationNs:  int64(time.Since(start) / time.Nanosecond),
 			})
 			s.sendToClient(conn, Message{
 				Type: "success",
