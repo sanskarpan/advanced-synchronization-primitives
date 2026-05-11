@@ -2,6 +2,7 @@ package primitives
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -41,7 +42,7 @@ func NewWaitGroup() *WaitGroup {
 func (wg *WaitGroup) Add(delta int) {
 	n := wg.counter.Add(int32(delta))
 	if n < 0 {
-		panic("waitgroup: negative counter")
+		panic(fmt.Sprintf("waitgroup: negative counter (counter=%d after adding delta=%d)", n, delta))
 	}
 	wg.addCount.Add(int64(delta))
 	if n == 0 {
@@ -53,7 +54,7 @@ func (wg *WaitGroup) Add(delta int) {
 func (wg *WaitGroup) Done() {
 	n := wg.counter.Add(-1)
 	if n < 0 {
-		panic("waitgroup: negative counter")
+		panic(fmt.Sprintf("waitgroup: negative counter (counter=%d after Done; too many Done calls)", n))
 	}
 	wg.doneCount.Add(1)
 	if n == 0 {
