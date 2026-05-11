@@ -20,6 +20,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file path")
 	tlsKey := flag.String("tls-key", "", "TLS key file path")
 	apiKey := flag.String("api-key", "", "WebSocket API key (empty = no authentication required)")
+	disableCompression := flag.Bool("disable-compression", false, "Disable WebSocket permessage-deflate compression")
 	flag.Parse()
 
 	// O1: Configure structured logging based on LOG_FORMAT env var.
@@ -49,6 +50,7 @@ func main() {
 		TLSCertFile:    *tlsCert,
 		TLSKeyFile:     *tlsKey,
 		APIKey:         *apiKey,
+		DisableCompression: *disableCompression,
 	}
 
 	server := web.NewServerWithConfig(cfg)
