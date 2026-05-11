@@ -17,6 +17,7 @@ class SyncPrimitivesApp {
         this.themeKey = 'syncprim_theme';
         this.canvasTheme = {};
         this.typeColors = {};
+        this.lastSequence = 0;
 
         this.initTheme();
         this.initCanvas();
@@ -157,6 +158,9 @@ class SyncPrimitivesApp {
             case 'initialState':
                 this.handleInitialState(message.payload);
                 break;
+            case 'state':
+                this.handleInitialState(message.payload);
+                break;
             case 'update':
                 this.handleUpdate(message.payload);
                 break;
@@ -180,29 +184,59 @@ class SyncPrimitivesApp {
     }
 
     handleInitialState(payload) {
-        this.primitives = payload.primitives || {};
-        this.goroutines = payload.goroutines || {};
-        this.events = payload.events || [];
-        this.metrics = payload.metrics || {};
+        this.primitives = payload.primitives || payload.Primitives || {};
+        this.goroutines = payload.goroutines || payload.Goroutines || {};
+        this.events = payload.events || payload.Events || [];
+        this.metrics = payload.metrics || payload.Metrics || {};
+        const sequence = payload.sequence || payload.Sequence;
+        if (typeof sequence === 'number') {
+            this.lastSequence = sequence;
+        }
 
         this.render();
     }
 
     handleUpdate(payload) {
-        if (payload.Primitives) {
-            this.primitives = payload.Primitives;
+        const sequence = payload.sequence || payload.Sequence;
+        if (typeof sequence === 'number') {
+            if (this.lastSequence !== 0 && sequence > this.lastSequence + 1) {
+                this.requestFullRefresh();
+            }
+            if (sequence > this.lastSequence) {
+                this.lastSequence = sequence;
+            }
         }
-        if (payload.Goroutines) {
-            this.goroutines = payload.Goroutines;
+
+        const changedPrims = payload.primitives || payload.Primitives;
+        if (changedPrims) {
+            this.primitives = Object.assign({}, this.primitives, changedPrims);
         }
-        if (payload.Events) {
-            this.events = payload.Events;
+
+        const deletedPrims = payload.deleted || payload.Deleted;
+        if (Array.isArray(deletedPrims)) {
+            deletedPrims.forEach((id) => {
+                delete this.primitives[id];
+                if (this.selectedPrimitive === id) {
+                    this.selectedPrimitive = null;
+                }
+            });
         }
-        if (payload.Metrics) {
-            this.metrics = payload.Metrics;
+
+        if (payload.Goroutines || payload.goroutines) {
+            this.goroutines = payload.Goroutines || payload.goroutines;
+        }
+        if (payload.Events || payload.events) {
+            this.events = payload.Events || payload.events;
+        }
+        if (payload.Metrics || payload.metrics) {
+            this.metrics = payload.Metrics || payload.metrics;
         }
 
         this.render();
+    }
+
+    requestFullRefresh() {
+        this.send('requestFullRefresh', {});
     }
 
     updateStatus(status) {

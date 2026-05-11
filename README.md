@@ -521,6 +521,9 @@ go run ./cmd/server/... -api-key my-secret-key
 docker build -t syncprimitives .
 docker run -p 8085:8085 syncprimitives
 
+# Kubernetes manifests
+kubectl apply -f deploy/kubernetes/
+
 # JSON logs
 LOG_FORMAT=json go run ./cmd/server/...
 ```

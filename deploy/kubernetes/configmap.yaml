@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: syncprimitives-config
+  labels:
+    app: syncprimitives
+# Non-secret runtime defaults. API keys belong in a Secret.
+data:
+  SYNCPRIM_ADDR: ":8085"
+  SYNCPRIM_ALLOWED_ORIGINS: ""
+  LOG_FORMAT: "json"

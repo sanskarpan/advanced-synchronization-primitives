@@ -149,6 +149,144 @@ func TestWebSocketConnect(t *testing.T) {
 	}
 }
 
+func TestWebSocketDeltaUpdateOnlyChangedPrimitives(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-delta-1", "name": "delta-1"})
+	drainUntilType(t, conn, "success")
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-delta-2", "name": "delta-2"})
+	drainUntilType(t, conn, "success")
+
+	// Wait for a baseline delta tick that includes both newly created primitives.
+	deadline := time.Now().Add(4 * time.Second)
+	seenBothCreated := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		prims, _ := payload["Primitives"].(map[string]interface{})
+		if prims == nil {
+			continue
+		}
+		_, has1 := prims["mu-delta-1"]
+		_, has2 := prims["mu-delta-2"]
+		if has1 && has2 {
+			seenBothCreated = true
+			break
+		}
+	}
+	if !seenBothCreated {
+		t.Fatal("did not observe baseline update containing both created primitives")
+	}
+
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-delta-1", "op": "lock", "holdMs": 1,
+	})
+	drainUntilType(t, conn, "success")
+
+	deadline = time.Now().Add(4 * time.Second)
+	foundChangedOnly := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		prims, _ := payload["Primitives"].(map[string]interface{})
+		if prims == nil || len(prims) != 1 {
+			continue
+		}
+		if _, ok := prims["mu-delta-1"]; ok {
+			if _, exists := prims["mu-delta-2"]; exists {
+				t.Fatalf("expected delta update to exclude unchanged primitive mu-delta-2")
+			}
+			foundChangedOnly = true
+			break
+		}
+	}
+	if !foundChangedOnly {
+		t.Fatal("did not observe delta update containing only changed primitive")
+	}
+
+	sendMsg(t, conn, "deletePrimitive", map[string]string{"id": "mu-delta-2"})
+	drainUntilType(t, conn, "success")
+
+	deadline = time.Now().Add(4 * time.Second)
+	foundDeletion := false
+	for time.Now().Before(deadline) {
+		msg := readMsg(t, conn)
+		if msg["type"] != "update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		if payload == nil {
+			continue
+		}
+		deleted, _ := payload["Deleted"].([]interface{})
+		for _, item := range deleted {
+			if id, ok := item.(string); ok && id == "mu-delta-2" {
+				foundDeletion = true
+				break
+			}
+		}
+		if foundDeletion {
+			break
+		}
+	}
+	if !foundDeletion {
+		t.Fatal("expected delta update to include deleted primitive id")
+	}
+}
+
+func TestWebSocketRequestFullRefresh(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-refresh-1", "name": "refresh"})
+	drainUntilType(t, conn, "success")
+
+	sendMsg(t, conn, "requestFullRefresh", map[string]interface{}{})
+	stateMsg := drainUntilType(t, conn, "state")
+	payload, _ := stateMsg["payload"].(map[string]interface{})
+	if payload == nil {
+		t.Fatal("expected state payload")
+	}
+	prims, _ := payload["primitives"].(map[string]interface{})
+	if prims == nil {
+		t.Fatalf("expected state payload to include primitives, got %#v", payload)
+	}
+	if _, ok := prims["mu-refresh-1"]; !ok {
+		t.Fatalf("expected full refresh state to include mu-refresh-1")
+	}
+
+	sendMsg(t, conn, "requestFullRefresh", map[string]interface{}{})
+	errMsg := drainUntilType(t, conn, "error")
+	errPayload, _ := errMsg["payload"].(map[string]interface{})
+	if errPayload == nil {
+		t.Fatal("expected error payload")
+	}
+	if !strings.Contains(fmt.Sprint(errPayload["message"]), "full refresh rate limit exceeded") {
+		t.Fatalf("expected full refresh rate-limit error, got %v", errPayload["message"])
+	}
+}
+
 // TestWebSocketCreateRWLock verifies createRWLock returns success.
 func TestWebSocketCreateRWLock(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
@@ -392,8 +530,8 @@ func TestWebSocketCompressionEnabledByDefault(t *testing.T) {
 
 func TestWebSocketCompressionCanBeDisabled(t *testing.T) {
 	srv := web.NewServerWithConfig(web.Config{
-		AllowedOrigins:      []string{"*"},
-		DisableCompression:  true,
+		AllowedOrigins:     []string{"*"},
+		DisableCompression: true,
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.HandleWebSocket)
@@ -522,6 +660,60 @@ func TestShutdownCancelsBlockedOp(t *testing.T) {
 	}
 	// Reaching here (no t.Fatal/t.Error above) means we did not hang.
 	ts.Close()
+}
+
+// TestDisconnectCancelsBlockedOp verifies that closing a client connection
+// cancels per-primitive contexts and unblocks waiting op goroutines.
+func TestDisconnectCancelsBlockedOp(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{AllowedOrigins: []string{"*"}})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	conn := dialWS(t, ts)
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "mu-disc", "name": "disc"})
+	drainUntilType(t, conn, "success")
+
+	// Acquire and hold the lock.
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-disc", "op": "lock", "holdMs": 5000,
+	})
+	drainUntilType(t, conn, "success")
+
+	// Second lock attempt blocks.
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-disc", "op": "lock", "holdMs": 5000,
+	})
+
+	// Wait until blocked goroutine is observed.
+	blockDeadline := time.Now().Add(2 * time.Second)
+	blockedSeen := false
+	for time.Now().Before(blockDeadline) {
+		if srv.GetSchedulerMetrics().BlockedGoroutines > 0 {
+			blockedSeen = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !blockedSeen {
+		t.Fatal("expected blocked goroutine before disconnect")
+	}
+
+	// Disconnect client; blocked op should unblock via context cancellation.
+	conn.Close()
+
+	unblockDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(unblockDeadline) {
+		if srv.GetSchedulerMetrics().BlockedGoroutines == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("blocked goroutines did not drain after disconnect: %+v", srv.GetSchedulerMetrics())
 }
 
 // TestWebSocketUnlockNotLocked verifies that unlocking an unlocked mutex returns error.
@@ -941,6 +1133,51 @@ func TestHealthzMethodNotAllowed(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", resp.StatusCode)
 	}
+}
+
+func TestHealthzIncludesCustomHistogramBuckets(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins:    []string{"*"},
+		HistogramBuckets:  []time.Duration{time.Millisecond, 10 * time.Millisecond},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", srv.HandleHealthz)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /healthz: %v", err)
+	}
+
+	rawBuckets, ok := body["histogram_buckets"].([]interface{})
+	if !ok || len(rawBuckets) != 2 {
+		t.Fatalf("expected 2 histogram buckets in healthz, got: %#v", body["histogram_buckets"])
+	}
+	if rawBuckets[0] != "1ms" || rawBuckets[1] != "10ms" {
+		t.Fatalf("unexpected histogram buckets: %#v", rawBuckets)
+	}
+}
+
+func TestInvalidHistogramBucketsPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for non-ascending histogram buckets")
+		}
+	}()
+	web.NewServerWithConfig(web.Config{
+		HistogramBuckets: []time.Duration{
+			10 * time.Millisecond,
+			1 * time.Millisecond,
+		},
+	})
 }
 
 // TestReadyzOK verifies that GET /readyz returns 200.
