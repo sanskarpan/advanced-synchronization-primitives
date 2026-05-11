@@ -624,11 +624,36 @@ docker build -t syncprimitives .
 docker run -p 8085:8085 syncprimitives
 
 # Kubernetes manifests
+kubectl create secret generic syncprimitives-secret \
+  --from-literal=api-key='replace-me' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 kubectl apply -f deploy/kubernetes/
+
+# Optional: enable snapshot persistence
+kubectl apply -f deploy/kubernetes/snapshot-pvc.yaml
+
+# Optional: if Prometheus Operator is installed
+kubectl apply -f deploy/kubernetes/servicemonitor.yaml
 
 # JSON logs
 LOG_FORMAT=json go run ./cmd/server/...
 ```
+
+The manifests under `deploy/kubernetes/` provide:
+
+- `deployment.yaml` with rolling updates, non-root security settings, probes, and resource limits
+- `service.yaml` for in-cluster HTTP and WebSocket traffic
+- `configmap.yaml` for non-secret runtime configuration
+- `hpa.yaml` for CPU and memory based autoscaling
+- `rbac.yaml` for the service account
+- `servicemonitor.yaml` for Prometheus Operator environments via a `ServiceMonitor`
+- `snapshot-pvc.yaml` as the optional claim for snapshot persistence
+
+Operational note:
+
+- multiple replicas still keep primitive state pod-local today; clients routed to different pods do not share in-memory primitives
+- mount the optional snapshot PVC only when you want restart-time state restoration
 
 ---
 
