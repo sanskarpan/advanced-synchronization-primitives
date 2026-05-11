@@ -365,6 +365,63 @@ func TestWebSocketAuthQueryParamRejected(t *testing.T) {
 	}
 }
 
+// TestWebSocketDefaultOriginValidation verifies localhost-only origin checks
+// reject attacker-controlled suffix domains and accept real loopback origins.
+func TestWebSocketDefaultOriginValidation(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	badHeaders := http.Header{"Origin": []string{"http://localhost.evil"}}
+	_, badResp, badErr := websocket.DefaultDialer.Dial(u, badHeaders)
+	if badErr == nil {
+		t.Fatal("expected dial to fail for non-loopback origin")
+	}
+	if badResp == nil || badResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-loopback origin, got: %v", badResp)
+	}
+
+	okHeaders := http.Header{"Origin": []string{"http://localhost:3000"}}
+	conn, _, err := websocket.DefaultDialer.Dial(u, okHeaders)
+	if err != nil {
+		t.Fatalf("expected localhost origin to be accepted, got: %v", err)
+	}
+	defer conn.Close()
+}
+
+func TestPrimitiveOpHoldMsClampWarning(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // initialState
+
+	sendMsg(t, conn, "createMutex", map[string]string{
+		"id":   "mu-cap",
+		"name": "cap-test",
+	})
+	drainUntilType(t, conn, "success")
+
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{
+		"id": "mu-cap", "op": "lock", "holdMs": 9999999,
+	})
+
+	msg := drainUntilType(t, conn, "success")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if payload == nil {
+		t.Fatal("expected success payload")
+	}
+	warning, _ := payload["warning"].(string)
+	if !strings.Contains(warning, "holdMs clamped") {
+		t.Fatalf("expected holdMs clamp warning, got payload: %#v", payload)
+	}
+}
+
 // TestShutdownCancelsBlockedOp verifies that Shutdown unblocks an op goroutine
 // that is waiting to acquire a held lock.
 func TestShutdownCancelsBlockedOp(t *testing.T) {
