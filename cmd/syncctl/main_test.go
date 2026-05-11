@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sanskar/syncprimitives/internal/auth"
 )
 
 func TestListJSON(t *testing.T) {
@@ -59,6 +60,35 @@ func TestConnectFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "failed to connect") {
 		t.Fatalf("expected connect failure message, got: %s", stderr)
+	}
+}
+
+func TestTokenGenerate(t *testing.T) {
+	code, out, stderr := runForTest([]string{"token", "generate", "--secret", "jwt-secret", "--sub", "alice", "--role", "viewer", "--ttl", "2m"}, nil)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr)
+	}
+
+	token := strings.TrimSpace(out)
+	claims, err := auth.ValidateJWT(token, "jwt-secret")
+	if err != nil {
+		t.Fatalf("expected valid generated token, got %v", err)
+	}
+	if claims.Sub != "alice" {
+		t.Fatalf("expected sub alice, got %q", claims.Sub)
+	}
+	if claims.Role != "viewer" {
+		t.Fatalf("expected role viewer, got %q", claims.Role)
+	}
+}
+
+func TestTokenGenerateRequiresSecret(t *testing.T) {
+	code, _, stderr := runForTest([]string{"token", "generate", "--sub", "alice"}, nil)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr, "--secret is required") {
+		t.Fatalf("expected secret validation error, got: %s", stderr)
 	}
 }
 

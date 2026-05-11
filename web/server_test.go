@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sanskar/syncprimitives/internal/auth"
 	"github.com/sanskar/syncprimitives/web"
 )
 
@@ -550,6 +551,89 @@ func TestWebSocketAuthQueryParamRejected(t *testing.T) {
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401, got: %v", resp)
 	}
+}
+
+func TestWebSocketJWTAuthAccepted(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "jwt-secret", "alice", "operator", time.Now().Add(time.Hour))
+	headers := http.Header{"Authorization": []string{"Bearer " + token}}
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(u, headers)
+	if err != nil {
+		t.Fatalf("expected successful dial with JWT, got: %v", err)
+	}
+	defer conn.Close()
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "initialState" {
+		t.Fatalf("expected initialState, got %v", msg["type"])
+	}
+}
+
+func TestWebSocketJWTAuthRejectedExpired(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "jwt-secret", "alice", "operator", time.Now().Add(-time.Minute))
+	headers := http.Header{"Authorization": []string{"Bearer " + token}}
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	_, resp, err := websocket.DefaultDialer.Dial(u, headers)
+	if err == nil {
+		t.Fatal("expected expired JWT dial to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %v", resp)
+	}
+}
+
+func TestWebSocketJWTAuthRejectedInvalidSignature(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "wrong-secret", "alice", "operator", time.Now().Add(time.Hour))
+	headers := http.Header{"Authorization": []string{"Bearer " + token}}
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	_, resp, err := websocket.DefaultDialer.Dial(u, headers)
+	if err == nil {
+		t.Fatal("expected invalid-signature JWT dial to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %v", resp)
+	}
+}
+
+func mustJWT(t *testing.T, secret, sub, role string, exp time.Time) string {
+	t.Helper()
+	token, err := auth.GenerateJWT(auth.Claims{
+		Sub:  sub,
+		Role: role,
+		Iat:  time.Now().Unix(),
+		Exp:  exp.Unix(),
+	}, secret)
+	if err != nil {
+		t.Fatalf("generate JWT: %v", err)
+	}
+	return token
 }
 
 func TestWebSocketCompressionEnabledByDefault(t *testing.T) {

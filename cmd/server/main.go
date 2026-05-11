@@ -20,6 +20,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file path")
 	tlsKey := flag.String("tls-key", "", "TLS key file path")
 	apiKey := flag.String("api-key", "", "WebSocket API key (empty = no authentication required)")
+	jwtSecret := flag.String("jwt-secret", "", "HS256 JWT secret for WebSocket Bearer authentication")
 	disableCompression := flag.Bool("disable-compression", false, "Disable WebSocket permessage-deflate compression")
 	flag.Parse()
 
@@ -46,10 +47,11 @@ func main() {
 	}
 
 	cfg := web.Config{
-		AllowedOrigins: allowedOrigins,
-		TLSCertFile:    *tlsCert,
-		TLSKeyFile:     *tlsKey,
-		APIKey:         *apiKey,
+		AllowedOrigins:     allowedOrigins,
+		TLSCertFile:        *tlsCert,
+		TLSKeyFile:         *tlsKey,
+		APIKey:             *apiKey,
+		JWTSecret:          *jwtSecret,
 		DisableCompression: *disableCompression,
 	}
 

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sanskar/syncprimitives/internal/auth"
 )
 
 const (
@@ -98,6 +99,8 @@ func runE(args []string, getenv func(string) string, stdout io.Writer) (int, err
 		return runDelete(cfg, cmdArgs, stdout)
 	case "stats":
 		return runStats(cfg, cmdArgs, stdout)
+	case "token":
+		return runToken(cmdArgs, stdout)
 	default:
 		return 2, &commandError{Code: 2, Msg: fmt.Sprintf("unknown command: %s", cmd)}
 	}
@@ -421,6 +424,44 @@ func runStats(cfg config, args []string, stdout io.Writer) (int, error) {
 	return 0, nil
 }
 
+func runToken(args []string, stdout io.Writer) (int, error) {
+	if len(args) == 0 || args[0] != "generate" {
+		return 2, &commandError{Code: 2, Msg: "usage: syncctl token generate --secret <secret> --sub <subject> [--role <role>] [--ttl <dur>]"}
+	}
+
+	fs := flag.NewFlagSet("token generate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	secret := fs.String("secret", "", "HS256 signing secret")
+	sub := fs.String("sub", "", "JWT subject")
+	role := fs.String("role", "", "JWT role claim")
+	ttl := fs.Duration("ttl", time.Hour, "Token lifetime")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2, &commandError{Code: 2, Msg: err.Error()}
+	}
+	if *secret == "" {
+		return 2, &commandError{Code: 2, Msg: "--secret is required"}
+	}
+	if *sub == "" {
+		return 2, &commandError{Code: 2, Msg: "--sub is required"}
+	}
+	if *ttl <= 0 {
+		return 2, &commandError{Code: 2, Msg: "--ttl must be positive"}
+	}
+
+	now := time.Now()
+	token, err := auth.GenerateJWT(auth.Claims{
+		Sub:  *sub,
+		Role: *role,
+		Iat:  now.Unix(),
+		Exp:  now.Add(*ttl).Unix(),
+	}, *secret)
+	if err != nil {
+		return 1, &commandError{Code: 1, Msg: err.Error()}
+	}
+	fmt.Fprintln(stdout, token)
+	return 0, nil
+}
+
 func dial(ctx context.Context, cfg config) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{}
 	if cfg.timeout > 0 {
@@ -677,6 +718,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  op <id> <operation>           Execute primitive operation")
 	fmt.Fprintln(w, "  delete <id>                   Delete primitive")
 	fmt.Fprintln(w, "  stats <id>                    Show primitive statistics")
+	fmt.Fprintln(w, "  token generate                Generate an HS256 JWT")
 	fmt.Fprintln(w, "  version                       Print syncctl version")
 	fmt.Fprintln(w, "  help                          Show help")
 	fmt.Fprintln(w)
