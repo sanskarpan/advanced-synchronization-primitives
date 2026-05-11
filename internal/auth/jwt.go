@@ -12,10 +12,11 @@ import (
 
 // Claims contains the JWT claims used by the server.
 type Claims struct {
-	Sub  string `json:"sub"`
-	Role string `json:"role"`
-	Iat  int64  `json:"iat"`
-	Exp  int64  `json:"exp"`
+	Sub       string `json:"sub"`
+	Role      string `json:"role"`
+	Namespace string `json:"namespace,omitempty"`
+	Iat       int64  `json:"iat"`
+	Exp       int64  `json:"exp"`
 }
 
 type header struct {

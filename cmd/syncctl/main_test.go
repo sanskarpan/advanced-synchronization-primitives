@@ -64,7 +64,7 @@ func TestConnectFailure(t *testing.T) {
 }
 
 func TestTokenGenerate(t *testing.T) {
-	code, out, stderr := runForTest([]string{"token", "generate", "--secret", "jwt-secret", "--sub", "alice", "--role", "viewer", "--ttl", "2m"}, nil)
+	code, out, stderr := runForTest([]string{"token", "generate", "--secret", "jwt-secret", "--sub", "alice", "--role", "viewer", "--namespace", "team-a", "--ttl", "2m"}, nil)
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr)
 	}
@@ -79,6 +79,9 @@ func TestTokenGenerate(t *testing.T) {
 	}
 	if claims.Role != "viewer" {
 		t.Fatalf("expected role viewer, got %q", claims.Role)
+	}
+	if claims.Namespace != "team-a" {
+		t.Fatalf("expected namespace team-a, got %q", claims.Namespace)
 	}
 }
 

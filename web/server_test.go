@@ -44,6 +44,12 @@ func dialWS(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	return dialWSWithHeaders(t, u, nil)
 }
 
+func dialWSPath(t *testing.T, ts *httptest.Server, path string, headers http.Header) *websocket.Conn {
+	t.Helper()
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + path
+	return dialWSWithHeaders(t, u, headers)
+}
+
 func dialWSWithHeaders(t *testing.T, url string, headers http.Header) *websocket.Conn {
 	t.Helper()
 	dialer := websocket.DefaultDialer
@@ -628,12 +634,17 @@ func TestWebSocketJWTAuthRejectedInvalidSignature(t *testing.T) {
 }
 
 func mustJWT(t *testing.T, secret, sub, role string, exp time.Time) string {
+	return mustJWTWithNamespace(t, secret, sub, role, "", exp)
+}
+
+func mustJWTWithNamespace(t *testing.T, secret, sub, role, namespace string, exp time.Time) string {
 	t.Helper()
 	token, err := auth.GenerateJWT(auth.Claims{
-		Sub:  sub,
-		Role: role,
-		Iat:  time.Now().Unix(),
-		Exp:  exp.Unix(),
+		Sub:       sub,
+		Role:      role,
+		Namespace: namespace,
+		Iat:       time.Now().Unix(),
+		Exp:       exp.Unix(),
 	}, secret)
 	if err != nil {
 		t.Fatalf("generate JWT: %v", err)
@@ -1021,9 +1032,63 @@ func TestWebSocketDuplicateIDReturnsError(t *testing.T) {
 	}
 }
 
-// TestPrimitiveIsolationAcrossConnections verifies that two connections can each
-// create a primitive with the same ID without conflict (per-connection isolation).
-func TestPrimitiveIsolationAcrossConnections(t *testing.T) {
+// TestPrimitiveIsolationAcrossNamespaces verifies that namespace selection isolates primitive storage.
+func TestPrimitiveIsolationAcrossNamespaces(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn1 := dialWSPath(t, ts, "/ws?ns=team-a", nil)
+	defer conn1.Close()
+	readMsg(t, conn1)
+
+	conn2 := dialWSPath(t, ts, "/ws?ns=team-b", nil)
+	defer conn2.Close()
+	readMsg(t, conn2)
+
+	sendMsg(t, conn1, "createMutex", map[string]string{"id": "shared-id", "name": "conn1-mutex"})
+	drainUntilType(t, conn1, "success")
+
+	sendMsg(t, conn2, "createMutex", map[string]string{"id": "shared-id", "name": "conn2-mutex"})
+	drainUntilType(t, conn2, "success")
+
+	sendMsg(t, conn1, "deletePrimitive", map[string]string{"id": "shared-id"})
+	drainUntilType(t, conn1, "success")
+
+	sendMsg(t, conn2, "primitiveOp", map[string]interface{}{
+		"id":     "shared-id",
+		"op":     "lock",
+		"holdMs": 1,
+	})
+	drainUntilType(t, conn2, "success")
+}
+
+func TestPrimitiveSharingWithinNamespace(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn1 := dialWSPath(t, ts, "/ws?ns=shared", nil)
+	defer conn1.Close()
+	readMsg(t, conn1)
+
+	conn2 := dialWSPath(t, ts, "/ws?ns=shared", nil)
+	defer conn2.Close()
+	readMsg(t, conn2)
+
+	sendMsg(t, conn1, "createMutex", map[string]string{"id": "shared-id", "name": "shared-mutex"})
+	drainUntilType(t, conn1, "success")
+
+	sendMsg(t, conn2, "createMutex", map[string]string{"id": "shared-id", "name": "duplicate"})
+	dup := drainUntilType(t, conn2, "error")
+	payload, _ := dup["payload"].(map[string]interface{})
+	if !strings.Contains(fmt.Sprint(payload["message"]), "already exists") {
+		t.Fatalf("expected duplicate-id error, got %v", payload["message"])
+	}
+
+	sendMsg(t, conn2, "primitiveOp", map[string]interface{}{"id": "shared-id", "op": "lock", "holdMs": 1})
+	drainUntilType(t, conn2, "success")
+}
+
+func TestDefaultNamespaceRejectsDuplicateAcrossConnections(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
 	defer cleanup()
 
@@ -1035,32 +1100,42 @@ func TestPrimitiveIsolationAcrossConnections(t *testing.T) {
 	defer conn2.Close()
 	readMsg(t, conn2)
 
-	// Both connections create a mutex with the same "shared-id" — both should succeed.
-	sendMsg(t, conn1, "createMutex", map[string]string{"id": "shared-id", "name": "conn1-mutex"})
-	msg1 := drainUntilType(t, conn1, "success")
-	if msg1["type"] != "success" {
-		t.Errorf("conn1: expected success, got %v", msg1)
-	}
-
-	sendMsg(t, conn2, "createMutex", map[string]string{"id": "shared-id", "name": "conn2-mutex"})
-	msg2 := drainUntilType(t, conn2, "success")
-	if msg2["type"] != "success" {
-		t.Errorf("conn2: expected success, got %v", msg2)
-	}
-
-	// conn1 deletes its primitive — conn2's primitive should still exist.
-	sendMsg(t, conn1, "deletePrimitive", map[string]string{"id": "shared-id"})
+	sendMsg(t, conn1, "createMutex", map[string]string{"id": "default-shared", "name": "default-a"})
 	drainUntilType(t, conn1, "success")
 
-	// conn2 should still be able to operate on its primitive.
-	sendMsg(t, conn2, "primitiveOp", map[string]interface{}{
-		"id": "shared-id",
-		"op": "lock",
-	})
-	msg3 := drainUntilType(t, conn2, "success")
-	if msg3["type"] != "success" {
-		t.Errorf("conn2: expected success after conn1 deleted its copy, got %v", msg3)
+	sendMsg(t, conn2, "createMutex", map[string]string{"id": "default-shared", "name": "default-b"})
+	msg := drainUntilType(t, conn2, "error")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if !strings.Contains(fmt.Sprint(payload["message"]), "already exists") {
+		t.Fatalf("expected duplicate-id error in default namespace, got %v", payload["message"])
 	}
+}
+
+func TestJWTNamespaceClaimRespected(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	headersA := http.Header{"Authorization": []string{"Bearer " + mustJWTWithNamespace(t, "jwt-secret", "alice", "admin", "ns-a", time.Now().Add(time.Hour))}}
+	connA := dialWSPath(t, ts, "/ws", headersA)
+	defer connA.Close()
+	readMsg(t, connA)
+
+	headersB := http.Header{"Authorization": []string{"Bearer " + mustJWTWithNamespace(t, "jwt-secret", "bob", "admin", "ns-b", time.Now().Add(time.Hour))}}
+	connB := dialWSPath(t, ts, "/ws", headersB)
+	defer connB.Close()
+	readMsg(t, connB)
+
+	sendMsg(t, connA, "createMutex", map[string]string{"id": "jwt-shared", "name": "jwt-a"})
+	drainUntilType(t, connA, "success")
+
+	sendMsg(t, connB, "createMutex", map[string]string{"id": "jwt-shared", "name": "jwt-b"})
+	drainUntilType(t, connB, "success")
 }
 
 // TestSchedulerTotalPrimitivesDecrement verifies that TotalPrimitives decrements
@@ -1119,8 +1194,8 @@ func TestGoroutineTrackingBlockedCount(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 
 	prims := srv.GetSchedulerPrimitives()
-	if info, ok := prims["mu-blk2"]; !ok {
-		t.Fatal("primitive mu-blk2 not found in scheduler")
+	if info, ok := prims["default/mu-blk2"]; !ok {
+		t.Fatal("primitive default/mu-blk2 not found in scheduler")
 	} else if info.BlockedCount < 1 {
 		t.Errorf("expected BlockedCount >= 1 while goroutine is blocked, got %d", info.BlockedCount)
 	}
@@ -1655,8 +1730,9 @@ func TestSnapshotRoundTrip(t *testing.T) {
 
 	// --- Phase 1: create server, register primitives, shutdown ---
 	srv1 := web.NewServerWithConfig(web.Config{
-		AllowedOrigins: []string{"*"},
-		SnapshotPath:   snapshotPath,
+		AllowedOrigins:   []string{"*"},
+		SnapshotPath:     snapshotPath,
+		DefaultNamespace: "production",
 	})
 	mux1 := http.NewServeMux()
 	mux1.HandleFunc("/ws", srv1.HandleWebSocket)
@@ -1687,7 +1763,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 
 	// Verify primitives are known to server 1.
 	prims1 := srv1.GetSchedulerPrimitives()
-	for _, id := range []string{"snap-rw1", "snap-sem1", "snap-bar1"} {
+	for _, id := range []string{"production/snap-rw1", "production/snap-sem1", "production/snap-bar1"} {
 		if _, ok := prims1[id]; !ok {
 			t.Fatalf("server1: primitive %q not found before shutdown", id)
 		}
@@ -1710,7 +1786,8 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("read snapshot: %v", err)
 	}
 	var snap struct {
-		Version int `json:"version"`
+		Version   int    `json:"version"`
+		Namespace string `json:"namespace"`
 	}
 	if err := json.Unmarshal(data, &snap); err != nil {
 		t.Fatalf("parse snapshot: %v", err)
@@ -1718,11 +1795,15 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if snap.Version != 1 {
 		t.Fatalf("expected snapshot version 1, got %d", snap.Version)
 	}
+	if snap.Namespace != "production" {
+		t.Fatalf("expected snapshot namespace production, got %q", snap.Namespace)
+	}
 
 	// --- Phase 2: new server, same snapshotPath, verify restore ---
 	srv2 := web.NewServerWithConfig(web.Config{
-		AllowedOrigins: []string{"*"},
-		SnapshotPath:   snapshotPath,
+		AllowedOrigins:   []string{"*"},
+		SnapshotPath:     snapshotPath,
+		DefaultNamespace: "production",
 	})
 	defer srv2.Shutdown(context.Background()) //nolint:errcheck
 
@@ -1730,7 +1811,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	prims2 := srv2.GetSchedulerPrimitives()
-	for _, id := range []string{"snap-rw1", "snap-sem1", "snap-bar1"} {
+	for _, id := range []string{"production/snap-rw1", "production/snap-sem1", "production/snap-bar1"} {
 		if _, ok := prims2[id]; !ok {
 			t.Errorf("server2: primitive %q not restored from snapshot", id)
 		}
@@ -1754,11 +1835,12 @@ func TestSnapshotLegacyFormatBackwardCompatibility(t *testing.T) {
 	}
 
 	srv := web.NewServerWithConfig(web.Config{
-		AllowedOrigins: []string{"*"},
-		SnapshotPath:   snapshotPath,
+		AllowedOrigins:   []string{"*"},
+		SnapshotPath:     snapshotPath,
+		DefaultNamespace: "legacy",
 	})
 	prims := srv.GetSchedulerPrimitives()
-	if _, ok := prims["legacy-mu-1"]; !ok {
+	if _, ok := prims["legacy/legacy-mu-1"]; !ok {
 		t.Fatalf("legacy primitive was not restored")
 	}
 	if err := srv.Shutdown(context.Background()); err != nil {
@@ -1771,13 +1853,17 @@ func TestSnapshotLegacyFormatBackwardCompatibility(t *testing.T) {
 		t.Fatalf("read upgraded snapshot: %v", err)
 	}
 	var upgraded struct {
-		Version int `json:"version"`
+		Version   int    `json:"version"`
+		Namespace string `json:"namespace"`
 	}
 	if err := json.Unmarshal(upgradedData, &upgraded); err != nil {
 		t.Fatalf("parse upgraded snapshot: %v", err)
 	}
 	if upgraded.Version != 1 {
 		t.Fatalf("expected upgraded snapshot version 1, got %d", upgraded.Version)
+	}
+	if upgraded.Namespace != "legacy" {
+		t.Fatalf("expected upgraded snapshot namespace legacy, got %q", upgraded.Namespace)
 	}
 }
 
