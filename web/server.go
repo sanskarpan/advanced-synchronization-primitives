@@ -85,6 +85,7 @@ type primEntry struct {
 type connPrims struct {
 	mu            sync.RWMutex
 	rwlocks       map[string]*primitives.RWLock
+	fairrwlocks   map[string]*primitives.FairRWLock
 	semaphores    map[string]*primitives.Semaphore
 	mutexes       map[string]*primitives.Mutex
 	condvars      map[string]*primitives.CondVar
@@ -103,6 +104,7 @@ type connPrims struct {
 func newConnPrims() *connPrims {
 	return &connPrims{
 		rwlocks:       make(map[string]*primitives.RWLock),
+		fairrwlocks:   make(map[string]*primitives.FairRWLock),
 		semaphores:    make(map[string]*primitives.Semaphore),
 		mutexes:       make(map[string]*primitives.Mutex),
 		condvars:      make(map[string]*primitives.CondVar),
@@ -118,14 +120,15 @@ func newConnPrims() *connPrims {
 // Must be called with cp.mu held (read or write).
 func (cp *connPrims) primExists(id string) bool {
 	_, ok1 := cp.rwlocks[id]
-	_, ok2 := cp.semaphores[id]
-	_, ok3 := cp.mutexes[id]
-	_, ok4 := cp.condvars[id]
-	_, ok5 := cp.barriers[id]
-	_, ok6 := cp.waitgroups[id]
-	_, ok7 := cp.onces[id]
-	_, ok8 := cp.singleflights[id]
-	return ok1 || ok2 || ok3 || ok4 || ok5 || ok6 || ok7 || ok8
+	_, ok2 := cp.fairrwlocks[id]
+	_, ok3 := cp.semaphores[id]
+	_, ok4 := cp.mutexes[id]
+	_, ok5 := cp.condvars[id]
+	_, ok6 := cp.barriers[id]
+	_, ok7 := cp.waitgroups[id]
+	_, ok8 := cp.onces[id]
+	_, ok9 := cp.singleflights[id]
+	return ok1 || ok2 || ok3 || ok4 || ok5 || ok6 || ok7 || ok8 || ok9
 }
 
 // Server manages WebSocket connections and the synchronization primitives
@@ -677,6 +680,8 @@ func (s *Server) handleMessage(conn *websocket.Conn, msg Message) {
 	switch msg.Type {
 	case "createRWLock":
 		s.handleCreateRWLock(conn, msg)
+	case "createFairRWLock":
+		s.handleCreateFairRWLock(conn, msg)
 	case "createSemaphore":
 		s.handleCreateSemaphore(conn, msg)
 	case "createMutex":
@@ -799,6 +804,53 @@ func (s *Server) handleCreateRWLock(conn *websocket.Conn, msg Message) {
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeRWLock), payload.Name)
 
 	s.sendSuccess(conn, "RWLock created")
+}
+
+// handleCreateFairRWLock creates a new FairRWLock for the requesting connection.
+func (s *Server) handleCreateFairRWLock(conn *websocket.Conn, msg Message) {
+	var payload struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.sendError(conn, "Invalid payload")
+		return
+	}
+
+	if e := validatePrimID(payload.ID); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+	if e := validatePrimName(payload.Name); e != "" {
+		s.sendError(conn, e)
+		return
+	}
+
+	cp := s.connPrimsFor(conn)
+	if cp == nil {
+		s.sendError(conn, "connection not registered")
+		return
+	}
+
+	cp.mu.Lock()
+	if cp.primExists(payload.ID) {
+		cp.mu.Unlock()
+		s.sendError(conn, "primitive with ID already exists: "+payload.ID)
+		return
+	}
+	rwlock := primitives.NewFairRWLock()
+	cp.fairrwlocks[payload.ID] = rwlock
+	primCtx, primCancel := context.WithCancel(s.shutdownCtx)
+	cp.primCtxsMu.Lock()
+	cp.primCtxs[payload.ID] = primEntry{ctx: primCtx, cancel: primCancel}
+	cp.primCtxsMu.Unlock()
+	cp.mu.Unlock()
+
+	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeFairRWLock, payload.Name, rwlock.GetStats())
+	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeFairRWLock), payload.Name)
+
+	s.sendSuccess(conn, "FairRWLock created")
 }
 
 // handleCreateSemaphore creates a new Semaphore for the requesting connection.
@@ -1148,6 +1200,7 @@ func (s *Server) handleDeletePrimitive(conn *websocket.Conn, msg Message) {
 		return
 	}
 	delete(cp.rwlocks, payload.ID)
+	delete(cp.fairrwlocks, payload.ID)
 	delete(cp.semaphores, payload.ID)
 	delete(cp.mutexes, payload.ID)
 	delete(cp.condvars, payload.ID)
@@ -1190,10 +1243,10 @@ func (s *Server) handleGetMetrics(conn *websocket.Conn, msg Message) {
 // maxIDLen and maxNameLen are upper bounds for primitive identifiers and names.
 // Enforced on every create handler to prevent memory-exhaustion via oversized strings.
 const (
-	maxIDLen      = 256
-	maxNameLen    = 256
-	holdMsMax     = 3_600_000
-	holdMsDefault = 100
+	maxIDLen         = 256
+	maxNameLen       = 256
+	holdMsMax        = 3_600_000
+	holdMsDefault    = 100
 	operationTimeout = time.Hour
 )
 
@@ -1287,6 +1340,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 
 		cp.mu.RLock()
 		rwlock := cp.rwlocks[payload.ID]
+		fairrwlock := cp.fairrwlocks[payload.ID]
 		semaphore := cp.semaphores[payload.ID]
 		mutex := cp.mutexes[payload.ID]
 		condvar := cp.condvars[payload.ID]
@@ -1326,30 +1380,68 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 
 		switch payload.Op {
 		case "rlock":
-			if rwlock == nil {
+			if rwlock != nil {
+				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				blockStart := time.Now()
+				if err := rwlock.RLockContext(opCtxForBlocking); err != nil {
+					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+					sendBlockingErr(err)
+					return
+				}
+				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				s.metricsCollector.RecordAcquire(payload.ID, rwlock.GetStats().CurrentReaders)
+				go func() {
+					select {
+					case <-baseOpCtx.Done():
+					case <-time.After(holdDuration):
+					}
+					rwlock.RUnlock()
+					s.metricsCollector.RecordRelease(payload.ID, rwlock.GetStats().CurrentReaders)
+				}()
+			} else if fairrwlock != nil {
+				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				blockStart := time.Now()
+				if err := fairrwlock.RLockContext(opCtxForBlocking); err != nil {
+					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+					sendBlockingErr(err)
+					return
+				}
+				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				s.metricsCollector.RecordAcquire(payload.ID, fairrwlock.GetStats().CurrentReaders)
+				go func() {
+					select {
+					case <-baseOpCtx.Done():
+					case <-time.After(holdDuration):
+					}
+					fairrwlock.RUnlock()
+					s.metricsCollector.RecordRelease(payload.ID, fairrwlock.GetStats().CurrentReaders)
+				}()
+			} else {
 				s.sendError(conn, "RWLock not found: "+payload.ID)
 				return
 			}
-			s.scheduler.BlockGoroutine(goroutineID, payload.ID)
-			blockStart := time.Now()
-			if err := rwlock.RLockContext(opCtxForBlocking); err != nil {
-				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				sendBlockingErr(err)
-				return
-			}
-			s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-			s.metricsCollector.RecordAcquire(payload.ID, rwlock.GetStats().CurrentReaders)
-			go func() {
-				select {
-				case <-baseOpCtx.Done():
-				case <-time.After(holdDuration):
-				}
-				rwlock.RUnlock()
-				s.metricsCollector.RecordRelease(payload.ID, rwlock.GetStats().CurrentReaders)
-			}()
 
 		case "lock":
-			if rwlock != nil {
+			if fairrwlock != nil {
+				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				blockStart := time.Now()
+				if err := fairrwlock.LockContext(opCtxForBlocking); err != nil {
+					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+					sendBlockingErr(err)
+					return
+				}
+				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
+				s.metricsCollector.RecordAcquire(payload.ID, 1)
+				s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(fairrwlock.GetStats().WaitersQueued))
+				go func() {
+					select {
+					case <-baseOpCtx.Done():
+					case <-time.After(holdDuration):
+					}
+					fairrwlock.Unlock()
+					s.metricsCollector.RecordRelease(payload.ID, 0)
+				}()
+			} else if rwlock != nil {
 				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
 				blockStart := time.Now()
 				if err := rwlock.LockContext(opCtxForBlocking); err != nil {
@@ -1721,6 +1813,9 @@ func (s *Server) updatePrimitiveStats() {
 			for id, rw := range cp.rwlocks {
 				s.scheduler.UpdatePrimitiveStats(id, rw.GetStats())
 			}
+			for id, rw := range cp.fairrwlocks {
+				s.scheduler.UpdatePrimitiveStats(id, rw.GetStats())
+			}
 			for id, sem := range cp.semaphores {
 				s.scheduler.UpdatePrimitiveStats(id, sem.GetStats())
 			}
@@ -1828,6 +1923,13 @@ func (s *Server) saveSnapshot() {
 			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
 				ID:   id,
 				Type: string(scheduler.TypeRWLock),
+				Name: nameFor(id),
+			})
+		}
+		for id := range cp.fairrwlocks {
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
+				ID:   id,
+				Type: string(scheduler.TypeFairRWLock),
 				Name: nameFor(id),
 			})
 		}
@@ -1993,6 +2095,18 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
 			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeRWLock, p.Name, rw.GetStats())
+			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			restored++
+		case string(scheduler.TypeFairRWLock):
+			rw := primitives.NewFairRWLock()
+			cp.mu.Lock()
+			cp.fairrwlocks[p.ID] = rw
+			primCtx, primCancel := context.WithCancel(s.shutdownCtx)
+			cp.primCtxsMu.Lock()
+			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
+			cp.primCtxsMu.Unlock()
+			cp.mu.Unlock()
+			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeFairRWLock, p.Name, rw.GetStats())
 			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeSemaphore):
