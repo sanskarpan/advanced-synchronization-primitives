@@ -1567,10 +1567,21 @@ type primitiveSnapshot struct {
 	Parties  int32  `json:"parties,omitempty"`  // Barrier
 }
 
+const snapshotVersion = 1
+
 // snapshotFile is the top-level structure written to disk.
 type snapshotFile struct {
 	Version    int                  `json:"version"`
 	Primitives []primitiveSnapshot  `json:"primitives"`
+}
+
+// legacyPrimitiveSnapshot is the historical unversioned on-disk format where
+// primitive IDs were map keys instead of embedded fields.
+type legacyPrimitiveSnapshot struct {
+	Type     string `json:"type"`
+	Name     string `json:"name"`
+	Capacity int32  `json:"capacity,omitempty"`
+	Parties  int32  `json:"parties,omitempty"`
 }
 
 // saveSnapshot writes the currently registered primitives (from all
@@ -1592,7 +1603,7 @@ func (s *Server) saveSnapshot() {
 	}
 
 	var snap snapshotFile
-	snap.Version = 1
+	snap.Version = snapshotVersion
 
 	s.connPrimsMu.RLock()
 	for _, cp := range s.connPrimsMap {
@@ -1698,11 +1709,52 @@ func (s *Server) loadSnapshot() {
 	}
 
 	var snap snapshotFile
-	if err := json.Unmarshal(data, &snap); err != nil {
-		slog.Warn("snapshot: parse failed", "path", s.snapshotPath, "err", err)
+	if err := json.Unmarshal(data, &snap); err == nil && snap.Version > 0 {
+		if snap.Version != snapshotVersion {
+			slog.Warn(
+				"snapshot: unsupported version; skipping load",
+				"path",
+				s.snapshotPath,
+				"file_version",
+				snap.Version,
+				"supported_version",
+				snapshotVersion,
+			)
+			return
+		}
+		s.restoreSnapshotPrimitives(snap.Primitives)
 		return
 	}
 
+	// Backward compatibility: accept legacy unversioned map snapshots.
+	var legacy map[string]legacyPrimitiveSnapshot
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		slog.Warn("snapshot: parse failed", "path", s.snapshotPath, "err", err)
+		return
+	}
+	legacyPrims := make([]primitiveSnapshot, 0, len(legacy))
+	for id, p := range legacy {
+		legacyPrims = append(legacyPrims, primitiveSnapshot{
+			ID:       id,
+			Type:     p.Type,
+			Name:     p.Name,
+			Capacity: p.Capacity,
+			Parties:  p.Parties,
+		})
+	}
+	if len(legacyPrims) > 0 {
+		slog.Warn(
+			"snapshot: loaded legacy unversioned format; will be upgraded on next save",
+			"path",
+			s.snapshotPath,
+			"primitives",
+			len(legacyPrims),
+		)
+	}
+	s.restoreSnapshotPrimitives(legacyPrims)
+}
+
+func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 	// Use a sentinel connPrims entry keyed under nil to hold restored primitives.
 	cp := newConnPrims()
 	s.connPrimsMu.Lock()
@@ -1710,7 +1762,7 @@ func (s *Server) loadSnapshot() {
 	s.connPrimsMu.Unlock()
 
 	restored := 0
-	for _, p := range snap.Primitives {
+	for _, p := range prims {
 		if p.ID == "" {
 			continue
 		}
