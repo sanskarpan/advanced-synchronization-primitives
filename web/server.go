@@ -1792,14 +1792,14 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 		}
 
 		if holdWarning != "" {
-			s.logAudit(conn, audit.Entry{
-				Event:       "primitive_op",
-				PrimitiveID: payload.ID,
-				Op:          payload.Op,
-				HoldMs:      payload.HoldMs,
-				Result:      "success",
-				DurationNs:  time.Since(start).Nanoseconds(),
-			})
+				s.logAudit(conn, audit.Entry{
+					Event:       "primitive_op",
+					PrimitiveID: payload.ID,
+					Op:          payload.Op,
+					HoldMs:      payload.HoldMs,
+					Result:      "success",
+					DurationNs:  time.Since(start).Nanoseconds(), // #nosec G115 -- stored in int64 field
+				})
 			s.sendToClient(conn, Message{
 				Type: "success",
 				Payload: jsonMarshal(map[string]string{
