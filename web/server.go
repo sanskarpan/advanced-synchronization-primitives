@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -177,10 +179,7 @@ func upgraderFor(cfg Config) websocket.Upgrader {
 				if origin == "" {
 					return true
 				}
-				return strings.HasPrefix(origin, "http://localhost") ||
-					strings.HasPrefix(origin, "http://127.0.0.1") ||
-					strings.HasPrefix(origin, "https://localhost") ||
-					strings.HasPrefix(origin, "https://127.0.0.1")
+				return isLoopbackOrigin(origin)
 			}
 			for _, allowed := range cfg.AllowedOrigins {
 				if allowed == "*" {
@@ -194,6 +193,25 @@ func upgraderFor(cfg Config) websocket.Upgrader {
 			return false
 		},
 	}
+}
+
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		host = u.Host
+	}
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // NewServer creates a new web server with default (localhost-only) config.
@@ -1011,8 +1029,10 @@ func (s *Server) handleGetMetrics(conn *websocket.Conn, msg Message) {
 // maxIDLen and maxNameLen are upper bounds for primitive identifiers and names.
 // Enforced on every create handler to prevent memory-exhaustion via oversized strings.
 const (
-	maxIDLen   = 256
-	maxNameLen = 256
+	maxIDLen    = 256
+	maxNameLen  = 256
+	holdMsMax   = 3_600_000
+	holdMsDefault = 100
 )
 
 // validatePrimID returns an error string when id is empty or exceeds maxIDLen.
@@ -1036,16 +1056,20 @@ func validatePrimName(name string) string {
 	return ""
 }
 
-// clampHoldMs clamps an integer to [1, 5000], defaulting to 100 if zero.
-// Used by handlePrimitiveOp for the configurable hold duration (R4).
-func clampHoldMs(ms int) time.Duration {
+// clampHoldMs clamps an integer to [1, holdMsMax], defaulting to holdMsDefault
+// when zero or negative. It returns the clamped duration and optional warning.
+func clampHoldMs(ms int) (time.Duration, string) {
+	requested := ms
 	if ms <= 0 {
-		ms = 100
+		ms = holdMsDefault
 	}
-	if ms > 5000 {
-		ms = 5000
+	if ms > holdMsMax {
+		ms = holdMsMax
 	}
-	return time.Duration(ms) * time.Millisecond
+	if requested > holdMsMax {
+		return time.Duration(ms) * time.Millisecond, fmt.Sprintf("holdMs clamped from %d to %d", requested, ms)
+	}
+	return time.Duration(ms) * time.Millisecond, ""
 }
 
 // handlePrimitiveOp handles operation requests from the frontend buttons.
@@ -1062,7 +1086,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 		return
 	}
 
-	holdDuration := clampHoldMs(payload.HoldMs)
+	holdDuration, holdWarning := clampHoldMs(payload.HoldMs)
 
 	go func() {
 		defer func() {
@@ -1312,6 +1336,16 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			return
 		}
 
+		if holdWarning != "" {
+			s.sendToClient(conn, Message{
+				Type: "success",
+				Payload: jsonMarshal(map[string]string{
+					"message": fmt.Sprintf("Operation %s on %s completed", payload.Op, payload.ID),
+					"warning": holdWarning,
+				}),
+			})
+			return
+		}
 		s.sendSuccess(conn, fmt.Sprintf("Operation %s on %s completed", payload.Op, payload.ID))
 	}()
 }
