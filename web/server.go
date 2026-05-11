@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sanskar/syncprimitives/internal/audit"
 	"github.com/sanskar/syncprimitives/internal/auth"
 	"github.com/sanskar/syncprimitives/internal/metrics"
 	"github.com/sanskar/syncprimitives/internal/primitives"
@@ -61,6 +62,13 @@ type Config struct {
 	// HistogramBuckets configures wait-duration histogram bucket upper bounds.
 	// Nil/empty uses defaults.
 	HistogramBuckets []time.Duration
+
+	// AuditLogPath enables persistent audit logging when non-empty.
+	AuditLogPath string
+	// AuditLogMaxBytes rotates the current audit log when exceeded. Zero disables rotation.
+	AuditLogMaxBytes int64
+	// AuditLogKeepFiles is the number of rotated files to retain.
+	AuditLogKeepFiles int
 }
 
 // connState holds per-connection rate-limiting state.
@@ -68,6 +76,7 @@ type connState struct {
 	// Sliding-window rate limit: track message timestamps.
 	msgTimes []time.Time
 	opTimes  []time.Time
+	connID   string
 	user     string
 	role     string
 	mu       sync.Mutex
@@ -197,9 +206,11 @@ type Server struct {
 	// goroutineCounter is incremented for each op goroutine to produce a
 	// unique ID for scheduler goroutine tracking.
 	goroutineCounter atomic.Uint64
+	connCounter      atomic.Uint64
 
 	// snapshotPath is the file path used for JSON state persistence (Fix 8).
 	snapshotPath string
+	auditLogger  *audit.Logger
 }
 
 // Message represents a WebSocket message
@@ -286,6 +297,15 @@ func NewServerWithConfig(cfg Config) *Server {
 		shutdownCancel:   cancel,
 		maxConns:         maxConns,
 		snapshotPath:     snapshotPath,
+	}
+
+	if cfg.AuditLogPath != "" {
+		logger, err := audit.New(cfg.AuditLogPath, cfg.AuditLogMaxBytes, cfg.AuditLogKeepFiles)
+		if err != nil {
+			slog.Error("failed to initialize audit logger", "err", err, "path", cfg.AuditLogPath)
+		} else {
+			s.auditLogger = logger
+		}
 	}
 
 	s.scheduler.Start()
@@ -563,6 +583,11 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 	fmt.Fprintf(w, "syncprim_auth_failures_total{reason=%q} %d\n", "expired", s.authFailuresExpired.Load())
 	fmt.Fprintf(w, "syncprim_auth_failures_total{reason=%q} %d\n", "invalid_signature", s.authFailuresInvalid.Load())
 	fmt.Fprintf(w, "syncprim_auth_failures_total{reason=%q} %d\n", "malformed", s.authFailuresMalformed.Load())
+	if s.auditLogger != nil {
+		fmt.Fprintf(w, "# HELP syncprim_dropped_audit_events_total Dropped audit events\n")
+		fmt.Fprintf(w, "# TYPE syncprim_dropped_audit_events_total counter\n")
+		fmt.Fprintf(w, "syncprim_dropped_audit_events_total %d\n", s.auditLogger.Dropped())
+	}
 
 	// Per-primitive wait duration histograms.
 	allMetrics := s.metricsCollector.GetAllMetrics()
@@ -606,6 +631,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"status":             "ok",
 		"uptime_seconds":     m.Uptime.Seconds(),
 		"dropped_broadcasts": s.droppedBroadcasts.Load(),
+		"dropped_audit_events": func() int64 {
+			if s.auditLogger == nil {
+				return 0
+			}
+			return s.auditLogger.Dropped()
+		}(),
 		"rate_limit_hits":    s.msgRateLimitHits.Load(),
 		"op_rate_limit_hits": s.opRateLimitHits.Load(),
 		"histogram_buckets":  bucketStr,
@@ -633,8 +664,9 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.writeMu[conn] = &sync.Mutex{}
 	s.writeMuMu.Unlock()
 
+	connID := fmt.Sprintf("conn-%d", s.connCounter.Add(1))
 	s.connStatesMu.Lock()
-	s.connStates[conn] = &connState{}
+	s.connStates[conn] = &connState{connID: connID}
 	s.connStatesMu.Unlock()
 
 	s.deltaStatesMu.Lock()
@@ -648,6 +680,11 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.connPrimsMu.Unlock()
 
 	slog.Info("Client connected", "addr", conn.RemoteAddr())
+	s.logAudit(conn, audit.Entry{
+		Timestamp: time.Now().UTC(),
+		Event:     "conn_opened",
+		Result:    "success",
+	})
 }
 
 // unregisterClient unregisters a WebSocket client and removes its per-connection primitive map.
@@ -682,6 +719,11 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 
 	s.activeConns.Add(-1)
 
+	s.logAudit(conn, audit.Entry{
+		Timestamp: time.Now().UTC(),
+		Event:     "conn_closed",
+		Result:    "success",
+	})
 	conn.Close()
 	slog.Info("Client disconnected", "addr", conn.RemoteAddr())
 }
@@ -851,6 +893,12 @@ func (s *Server) handleCreateRWLock(conn *websocket.Conn, msg Message) {
 
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeRWLock, payload.Name, rwlock.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeRWLock), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeRWLock),
+		Result:        "success",
+	})
 
 	s.sendSuccess(conn, "RWLock created")
 }
@@ -951,6 +999,12 @@ func (s *Server) handleCreateSemaphore(conn *websocket.Conn, msg Message) {
 
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeSemaphore, payload.Name, semaphore.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeSemaphore), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeSemaphore),
+		Result:        "success",
+	})
 
 	s.sendSuccess(conn, "Semaphore created")
 }
@@ -998,6 +1052,12 @@ func (s *Server) handleCreateMutex(conn *websocket.Conn, msg Message) {
 
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeMutex, payload.Name, mutex.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeMutex), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeMutex),
+		Result:        "success",
+	})
 
 	s.sendSuccess(conn, "Mutex created")
 }
@@ -1045,6 +1105,12 @@ func (s *Server) handleCreateCondVar(conn *websocket.Conn, msg Message) {
 
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeCondVar, payload.Name, condvar.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeCondVar), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeCondVar),
+		Result:        "success",
+	})
 
 	s.sendSuccess(conn, "CondVar created")
 }
@@ -1098,6 +1164,12 @@ func (s *Server) handleCreateBarrier(conn *websocket.Conn, msg Message) {
 
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeBarrier, payload.Name, barrier.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeBarrier), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeBarrier),
+		Result:        "success",
+	})
 
 	s.sendSuccess(conn, "Barrier created")
 }
@@ -1140,6 +1212,12 @@ func (s *Server) handleCreateWaitGroup(conn *websocket.Conn, msg Message) {
 	cp.mu.Unlock()
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeWaitGroup, payload.Name, wg.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeWaitGroup), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeWaitGroup),
+		Result:        "success",
+	})
 	s.sendSuccess(conn, "WaitGroup created")
 }
 
@@ -1181,6 +1259,12 @@ func (s *Server) handleCreateOnce(conn *websocket.Conn, msg Message) {
 	cp.mu.Unlock()
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeOnce, payload.Name, o.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeOnce), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeOnce),
+		Result:        "success",
+	})
 	s.sendSuccess(conn, "Once created")
 }
 
@@ -1222,6 +1306,12 @@ func (s *Server) handleCreateSingleflight(conn *websocket.Conn, msg Message) {
 	cp.mu.Unlock()
 	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeSingleflight, payload.Name, g.GetStats())
 	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeSingleflight), payload.Name)
+	s.logAudit(conn, audit.Entry{
+		Event:         "primitive_created",
+		PrimitiveID:   payload.ID,
+		PrimitiveType: string(scheduler.TypeSingleflight),
+		Result:        "success",
+	})
 	s.sendSuccess(conn, "Singleflight created")
 }
 
@@ -1269,6 +1359,11 @@ func (s *Server) handleDeletePrimitive(conn *websocket.Conn, msg Message) {
 
 	s.scheduler.UnregisterPrimitive(payload.ID)
 	s.metricsCollector.UnregisterPrimitive(payload.ID)
+	s.logAudit(conn, audit.Entry{
+		Event:       "primitive_deleted",
+		PrimitiveID: payload.ID,
+		Result:      "success",
+	})
 
 	s.sendSuccess(conn, "Primitive deleted")
 }
@@ -1422,20 +1517,46 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 		cp.primCtxsMu.Unlock()
 		opCtxForBlocking, opCancel := context.WithTimeout(baseOpCtx, operationTimeout)
 		defer opCancel()
+		start := time.Now()
 
 		sendBlockingErr := func(err error) {
 			if errors.Is(err, context.DeadlineExceeded) {
+				s.logAudit(conn, audit.Entry{
+					Event:       "primitive_op",
+					PrimitiveID: payload.ID,
+					Op:          payload.Op,
+					HoldMs:      payload.HoldMs,
+					Result:      "error",
+					Error:       "operation timed out after 1 hour",
+					DurationNs:  time.Since(start).Nanoseconds(),
+				})
 				s.sendError(conn, "operation timed out after 1 hour")
 				return
 			}
 			if baseOpCtx.Err() != nil {
+				s.logAudit(conn, audit.Entry{
+					Event:       "primitive_op",
+					PrimitiveID: payload.ID,
+					Op:          payload.Op,
+					HoldMs:      payload.HoldMs,
+					Result:      "error",
+					Error:       "primitive deleted while operation was in progress",
+					DurationNs:  time.Since(start).Nanoseconds(),
+				})
 				s.sendError(conn, "primitive deleted while operation was in progress")
 				return
 			}
+			s.logAudit(conn, audit.Entry{
+				Event:       "primitive_op",
+				PrimitiveID: payload.ID,
+				Op:          payload.Op,
+				HoldMs:      payload.HoldMs,
+				Result:      "error",
+				Error:       "operation cancelled",
+				DurationNs:  time.Since(start).Nanoseconds(),
+			})
 			s.sendError(conn, "operation cancelled")
 		}
-
-		start := time.Now()
 
 		switch payload.Op {
 		case "rlock":
@@ -1671,6 +1792,14 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 		}
 
 		if holdWarning != "" {
+			s.logAudit(conn, audit.Entry{
+				Event:       "primitive_op",
+				PrimitiveID: payload.ID,
+				Op:          payload.Op,
+				HoldMs:      payload.HoldMs,
+				Result:      "success",
+				DurationNs:  time.Since(start).Nanoseconds(),
+			})
 			s.sendToClient(conn, Message{
 				Type: "success",
 				Payload: jsonMarshal(map[string]string{
@@ -1680,6 +1809,14 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			})
 			return
 		}
+		s.logAudit(conn, audit.Entry{
+			Event:       "primitive_op",
+			PrimitiveID: payload.ID,
+			Op:          payload.Op,
+			HoldMs:      payload.HoldMs,
+			Result:      "success",
+			DurationNs:  time.Since(start).Nanoseconds(),
+		})
 		s.sendSuccess(conn, fmt.Sprintf("Operation %s on %s completed", payload.Op, payload.ID))
 	}()
 }
@@ -1698,6 +1835,26 @@ func (s *Server) sendError(conn *websocket.Conn, message string) {
 		Type:    "error",
 		Payload: jsonMarshal(map[string]string{"message": message}),
 	})
+}
+
+func (s *Server) logAudit(conn *websocket.Conn, entry audit.Entry) {
+	if s.auditLogger == nil {
+		return
+	}
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	s.connStatesMu.Lock()
+	if state, ok := s.connStates[conn]; ok {
+		if entry.ConnID == "" {
+			entry.ConnID = state.connID
+		}
+		if entry.User == "" {
+			entry.User = state.user
+		}
+	}
+	s.connStatesMu.Unlock()
+	s.auditLogger.Log(entry)
 }
 
 // sendToClient sends a message to a specific client
@@ -2362,8 +2519,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Signal the scheduler (and forwardSchedulerUpdates) to exit.
 	s.scheduler.Stop()
 	// Drain active HTTP/WebSocket connections.
+	var shutdownErr error
 	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+		shutdownErr = s.httpServer.Shutdown(ctx)
 	}
-	return nil
+	if s.auditLogger != nil {
+		if err := s.auditLogger.Close(); err != nil {
+			slog.Error("audit log close error", "err", err)
+		}
+	}
+	return shutdownErr
 }
