@@ -89,6 +89,7 @@ func (s *Semaphore) AcquireN(n int32) {
 		}
 
 		waiter.Wait()
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		s.totalWaitTime.Add(waitTime)
@@ -220,6 +221,7 @@ func (s *Semaphore) AcquireNTimeout(n int32, timeout time.Duration) bool {
 			s.timeouts.Add(1)
 			return false
 		}
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		s.totalWaitTime.Add(waitTime)
@@ -278,6 +280,7 @@ func (s *Semaphore) AcquireNContext(ctx context.Context, n int32) error {
 			// WaitContext already set cancelled.
 			return err
 		}
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		s.totalWaitTime.Add(waitTime)
