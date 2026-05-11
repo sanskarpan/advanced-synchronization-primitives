@@ -23,6 +23,7 @@
     --border: #e0e0e0;
     --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     --type-rwlock: #2196f3;
+    --type-fairrwlock: #3f51b5;
     --type-semaphore: #9c27b0;
     --type-mutex: #4caf50;
     --type-condvar: #ff9800;
@@ -51,6 +52,7 @@
     --border: #334155;
     --shadow: 0 4px 10px rgba(0, 0, 0, 0.45);
     --type-rwlock: #60a5fa;
+    --type-fairrwlock: #818cf8;
     --type-semaphore: #c084fc;
     --type-mutex: #4ade80;
     --type-condvar: #fbbf24;
@@ -357,6 +359,7 @@ button:active {
 }
 
 .type-rwlock { background: color-mix(in srgb, var(--type-rwlock) 18%, var(--surface) 82%); color: var(--type-rwlock); }
+.type-fairrwlock { background: color-mix(in srgb, var(--type-fairrwlock) 18%, var(--surface) 82%); color: var(--type-fairrwlock); }
 .type-semaphore { background: color-mix(in srgb, var(--type-semaphore) 18%, var(--surface) 82%); color: var(--type-semaphore); }
 .type-mutex { background: color-mix(in srgb, var(--type-mutex) 18%, var(--surface) 82%); color: var(--type-mutex); }
 .type-condvar { background: color-mix(in srgb, var(--type-condvar) 18%, var(--surface) 82%); color: var(--type-condvar); }

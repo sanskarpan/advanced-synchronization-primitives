@@ -92,6 +92,7 @@ func (rw *RWLock) RLock() {
 			}
 
 			waiter.Wait()
+			putWaiter(waiter)
 
 			waitTime := time.Since(startTime).Nanoseconds()
 			rw.totalWaitTime.Add(waitTime)
@@ -171,6 +172,7 @@ func (rw *RWLock) Lock() {
 			}
 
 			waiter.Wait()
+			putWaiter(waiter)
 
 			waitTime := time.Since(startTime).Nanoseconds()
 			rw.totalWaitTime.Add(waitTime)
@@ -256,6 +258,7 @@ func (rw *RWLock) RLockContext(ctx context.Context) error {
 		if err := waiter.WaitContext(ctx); err != nil {
 			return err
 		}
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		rw.totalWaitTime.Add(waitTime)
@@ -301,6 +304,7 @@ func (rw *RWLock) LockContext(ctx context.Context) error {
 		if err := waiter.WaitContext(ctx); err != nil {
 			return err
 		}
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		rw.totalWaitTime.Add(waitTime)
@@ -422,4 +426,3 @@ func (s RWLockStats) String() string {
 		s.Age,
 	)
 }
-

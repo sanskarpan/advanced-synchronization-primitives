@@ -110,6 +110,7 @@ func (b *Barrier) Wait() (int32, error) {
 	}
 
 	waiter.Wait()
+	putWaiter(waiter)
 
 	// Check broken state after wakeup.
 	if b.broken.Load() {
@@ -215,6 +216,7 @@ func (b *Barrier) WaitTimeout(timeout time.Duration) (int32, bool) {
 		waiter.cancelled.Store(true)
 		return -1, false
 	}
+	putWaiter(waiter)
 
 	// Check broken state after wakeup.
 	if b.broken.Load() {
@@ -291,6 +293,7 @@ func (b *Barrier) WaitContext(ctx context.Context) (int32, error) {
 		}
 		return -1, err
 	}
+	putWaiter(waiter)
 
 	// Check broken state after wakeup.
 	if b.broken.Load() {
@@ -432,4 +435,3 @@ func (s BarrierStats) String() string {
 		s.Age,
 	)
 }
-

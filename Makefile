@@ -1,10 +1,19 @@
-.PHONY: build test race bench clean lint examples coverage
+.PHONY: build syncctl dist test race bench clean lint examples coverage
 
 BINARY := syncprimitives-server
 COVERAGE_THRESHOLD := 70
 
 build:
 	go build -o $(BINARY) ./cmd/server
+
+syncctl:
+	go build -o syncctl ./cmd/syncctl
+
+dist:
+	mkdir -p dist
+	GOOS=linux GOARCH=amd64 go build -o dist/syncctl-linux-amd64 ./cmd/syncctl
+	GOOS=darwin GOARCH=arm64 go build -o dist/syncctl-darwin-arm64 ./cmd/syncctl
+	GOOS=windows GOARCH=amd64 go build -o dist/syncctl-windows-amd64.exe ./cmd/syncctl
 
 test:
 	go test -timeout 120s ./...

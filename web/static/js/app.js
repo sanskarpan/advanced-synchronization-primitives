@@ -65,6 +65,7 @@ class SyncPrimitivesApp {
         };
         this.typeColors = {
             'RWLock': this.cssVar('--type-rwlock', '#2196f3'),
+            'FairRWLock': this.cssVar('--type-fairrwlock', '#3f51b5'),
             'Semaphore': this.cssVar('--type-semaphore', '#9c27b0'),
             'Mutex': this.cssVar('--type-mutex', '#4caf50'),
             'CondVar': this.cssVar('--type-condvar', '#ff9800'),
@@ -328,7 +329,7 @@ class SyncPrimitivesApp {
             }
 
             // Safe: prim.Type comes from server data but is validated against known set
-            const knownTypes = ['RWLock', 'Semaphore', 'Mutex', 'CondVar', 'Barrier',
+            const knownTypes = ['RWLock', 'FairRWLock', 'Semaphore', 'Mutex', 'CondVar', 'Barrier',
                                 'WaitGroup', 'Once', 'Singleflight'];
             const safeType = knownTypes.includes(prim.Type) ? prim.Type : 'Unknown';
             const typeClass = `type-${safeType.toLowerCase()}`;
@@ -430,6 +431,7 @@ class SyncPrimitivesApp {
     _opsForType(type) {
         switch (type) {
             case 'RWLock':
+            case 'FairRWLock':
                 return [{label: 'RLock', op: 'rlock'}, {label: 'Lock', op: 'lock'}];
             case 'Semaphore':
                 return [{label: 'Acquire', op: 'acquire'}, {label: 'Release', op: 'release'}];
@@ -830,7 +832,7 @@ class SyncPrimitivesApp {
     }
 
     runStressTest() {
-        const types = ['rwlock', 'semaphore', 'mutex'];
+        const types = ['rwlock', 'fairrwlock', 'semaphore', 'mutex'];
         let count = 0;
 
         const interval = setInterval(() => {
@@ -846,6 +848,7 @@ class SyncPrimitivesApp {
 
             const messageTypes = {
                 'rwlock': 'createRWLock',
+                'fairrwlock': 'createFairRWLock',
                 'semaphore': 'createSemaphore',
                 'mutex': 'createMutex'
             };
@@ -902,6 +905,7 @@ function createPrimitive() {
 
     const messageTypes = {
         'rwlock': 'createRWLock',
+        'fairrwlock': 'createFairRWLock',
         'semaphore': 'createSemaphore',
         'mutex': 'createMutex',
         'condvar': 'createCondVar',

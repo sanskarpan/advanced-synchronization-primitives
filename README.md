@@ -69,6 +69,7 @@ This library implements eight fundamental synchronization primitives entirely fr
 │  Waiter      (channel-based park/unpark with cancellation)      │
 │                                                                 │
 │  RWLock      — writer-preference, atomic state word            │
+│  FairRWLock  — strict FIFO reader/writer ordering              │
 │  Semaphore   — counting, AcquireN / ReleaseN                   │
 │  Mutex       — non-handoff, lost-wakeup safe                   │
 │  CondVar     — Wait / WaitTimeout / WaitFor / Broadcast        │
@@ -83,10 +84,11 @@ This library implements eight fundamental synchronization primitives entirely fr
 
 ## Features
 
-### Eight Synchronization Primitives
+### Nine Synchronization Primitives
 | Primitive | Key API | Notes |
 |---|---|---|
 | **RWLock** | `RLock/RUnlock`, `Lock/Unlock`, `TryRLock`, `TryLock`, `RLockContext`, `LockContext` | Writer-preference; atomic `Int32` state word |
+| **FairRWLock** | `RLock/RUnlock`, `Lock/Unlock`, `TryRLock`, `TryLock`, `RLockContext`, `LockContext` | Strict FIFO fairness across readers/writers |
 | **Semaphore** | `Acquire/Release`, `AcquireN/ReleaseN`, `TryAcquire`, `AcquireTimeout`, `AcquireContext` | Capacity-safe `Release` returns error on overflow |
 | **Mutex** | `Lock/Unlock`, `TryLock`, `LockContext` | Non-handoff model; `sync.Locker` compliant |
 | **CondVar** | `Wait(m)`, `WaitTimeout`, `WaitFor(m, cond)`, `Signal`, `Broadcast` | Spurious-wakeup-safe `WaitFor` helper |
@@ -145,6 +147,53 @@ Open [http://localhost:8085](http://localhost:8085) in your browser.
 The dashboard lets you create primitives, perform operations, and watch goroutine state transitions in real time.
 
 ---
+
+## `syncctl` CLI
+
+Build:
+
+```bash
+make syncctl
+```
+
+Global flags:
+
+- `--server` WebSocket URL (default: `ws://localhost:8085/ws`, env: `SYNCPRIM_SERVER`)
+- `--api-key` Bearer token (env: `SYNCPRIM_API_KEY`)
+- `--json` machine-readable JSON output
+- `--timeout` command timeout (default: `30s`)
+- `--insecure` skip TLS verification for `wss://` targets
+
+Commands:
+
+```bash
+syncctl list
+syncctl create mutex my-lock
+syncctl create semaphore sem-1 --capacity 5
+syncctl op my-lock lock --hold 500
+syncctl delete my-lock
+syncctl stats my-lock
+```
+
+JSON mode:
+
+```bash
+syncctl --json list
+syncctl --json stats my-lock
+```
+
+Using API key via environment variable (recommended for scripts):
+
+```bash
+export SYNCPRIM_API_KEY='your-secret-key'
+syncctl --server ws://localhost:8085/ws list
+```
+
+Cross-platform binaries:
+
+```bash
+make dist
+```
 
 ## Go SDK
 
@@ -410,6 +459,7 @@ All WebSocket messages are JSON objects with a `type` string field and a `payloa
 | `type` | Required `payload` fields | Description |
 |--------|--------------------------|-------------|
 | `createRWLock` | `id` (string), `name` (string) | Create a new RWLock |
+| `createFairRWLock` | `id` (string), `name` (string) | Create a new FairRWLock |
 | `createSemaphore` | `id`, `name`, `capacity` (int32 ≥1) | Create a Semaphore |
 | `createMutex` | `id`, `name` | Create a Mutex |
 | `createCondVar` | `id`, `name` | Create a CondVar |
@@ -425,6 +475,7 @@ All WebSocket messages are JSON objects with a `type` string field and a `payloa
 | Primitive | `op` values |
 |-----------|------------|
 | RWLock | `rlock`, `runlock`, `lock`, `unlock`, `tryRLock`, `tryLock` |
+| FairRWLock | `rlock`, `runlock`, `lock`, `unlock`, `tryRLock`, `tryLock` |
 | Semaphore | `acquire`, `release` |
 | Mutex | `lock`, `unlock`, `tryLock` |
 | CondVar | `wait`, `signal`, `broadcast` |
@@ -484,9 +535,10 @@ github.com/sanskar/syncprimitives
 │   └── server/
 │       └── main.go          — entry point, flag parsing, signal handling
 ├── internal/
-│   ├── primitives/          — all 8 primitives + WaiterQueue + Waiter
+│   ├── primitives/          — all 9 primitives + WaiterQueue + Waiter
 │   │   ├── waiter.go        — Waiter (channel park/unpark) + WaiterQueue (lock-free)
 │   │   ├── rwlock.go        — RWLock
+│   │   ├── fair_rwlock.go   — FairRWLock
 │   │   ├── semaphore.go     — Semaphore
 │   │   ├── condvar.go       — Mutex + CondVar (same file; CondVar depends on Mutex)
 │   │   ├── barrier.go       — Barrier

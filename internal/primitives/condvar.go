@@ -69,6 +69,7 @@ func (m *Mutex) Lock() {
 
 		// Block until Unlock signals us.
 		waiter.Wait()
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		m.totalWaitTime.Add(waitTime)
@@ -134,6 +135,7 @@ func (m *Mutex) LockContext(ctx context.Context) error {
 			// WaitContext already set waiter.cancelled.
 			return err
 		}
+		putWaiter(waiter)
 
 		waitTime := time.Since(startTime).Nanoseconds()
 		m.totalWaitTime.Add(waitTime)
@@ -204,6 +206,7 @@ func (cv *CondVar) Wait(m *Mutex) {
 
 	// Wait for signal
 	waiter.Wait()
+	putWaiter(waiter)
 
 	waitTime := time.Since(startTime).Nanoseconds()
 	cv.totalWaitTime.Add(waitTime)
@@ -234,6 +237,8 @@ func (cv *CondVar) WaitTimeout(m *Mutex, timeout time.Duration) bool {
 	if !signaled {
 		// Timed out: cancel the waiter so a future Signal/Broadcast skip it.
 		waiter.cancelled.Store(true)
+	} else {
+		putWaiter(waiter)
 	}
 	waitTime := time.Since(startTime).Nanoseconds()
 	cv.totalWaitTime.Add(waitTime)
