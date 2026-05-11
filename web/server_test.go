@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,7 +99,16 @@ func drainUntilType(t *testing.T, conn *websocket.Conn, wantType string) map[str
 	}
 }
 
-// TestHandleStaticOK verifies that GET / returns 200.
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(body)
+}
+
+// TestHandleStaticOK verifies that GET / returns the embedded dashboard shell.
 func TestHandleStaticOK(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
 	defer cleanup()
@@ -109,11 +119,85 @@ func TestHandleStaticOK(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// ServeFile returns 200 for the root (serves index.html if it exists,
-	// or 404 if static files are not present in the test working directory).
-	// Both 200 and 404 are acceptable — the important thing is no 500.
-	if resp.StatusCode == 500 {
-		t.Errorf("GET / returned 500")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /: expected 200, got %d", resp.StatusCode)
+	}
+
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("GET /: expected HTML content type, got %q", ct)
+	}
+
+	body := readBody(t, resp)
+	for _, want := range []string{
+		"<title>Advanced Synchronization Primitives</title>",
+		`id="create-btn"`,
+		`id="prim-count"`,
+		`id="event-count"`,
+		`<script src="/js/app.js"></script>`,
+		`<link rel="stylesheet" href="/css/style.css">`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /: expected body to contain %q", want)
+		}
+	}
+
+	if strings.Contains(body, "onclick=") {
+		t.Fatal("GET /: expected dashboard HTML to avoid inline onclick handlers")
+	}
+}
+
+func TestHandleStaticServesEmbeddedAssets(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	tests := []struct {
+		path        string
+		contentType string
+		snippets    []string
+	}{
+		{
+			path:        "/css/style.css",
+			contentType: "text/css",
+			snippets: []string{
+				":root {",
+				".count-badge {",
+				".notification {",
+			},
+		},
+		{
+			path:        "/js/app.js",
+			contentType: "javascript",
+			snippets: []string{
+				"const app = new SyncPrimitivesApp();",
+				"this.updateCounts();",
+				"createBtn.addEventListener('click', () => this.createPrimitive());",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s: expected 200, got %d", tc.path, resp.StatusCode)
+			}
+
+			if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, tc.contentType) {
+				t.Fatalf("GET %s: expected content type containing %q, got %q", tc.path, tc.contentType, ct)
+			}
+
+			body := readBody(t, resp)
+			for _, want := range tc.snippets {
+				if !strings.Contains(body, want) {
+					t.Fatalf("GET %s: expected body to contain %q", tc.path, want)
+				}
+			}
+		})
 	}
 }
 
