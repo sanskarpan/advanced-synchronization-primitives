@@ -24,6 +24,13 @@ class SyncPrimitivesApp {
         this.reconnectDelay = 1000;
         this.reconnectTimer = null;
         this.clearAllConfirmUntil = 0;
+        this.primitiveQuery = '';
+        this.primitiveTypeFilter = 'all';
+        this.showBlockedOnly = false;
+        this.eventQuery = '';
+        this.eventsPaused = false;
+        this.pausedEvents = [];
+        this.bufferedEventCount = 0;
 
         this.initTheme();
         this.initCanvas();
@@ -183,8 +190,8 @@ class SyncPrimitivesApp {
         };
     }
 
-    scheduleReconnect() {
-        this.scheduleReconnectIn();
+    scheduleReconnect(delayOverride) {
+        this.scheduleReconnectIn(delayOverride);
     }
 
     scheduleReconnectIn(delayOverride) {
@@ -234,7 +241,7 @@ class SyncPrimitivesApp {
     handleInitialState(payload) {
         this.primitives = payload.primitives || payload.Primitives || {};
         this.goroutines = payload.goroutines || payload.Goroutines || {};
-        this.events = payload.events || payload.Events || [];
+        this.applyIncomingEvents(payload.events || payload.Events || []);
         this.metrics = payload.metrics || payload.Metrics || {};
         const sequence = payload.sequence || payload.Sequence;
         if (typeof sequence === 'number') {
@@ -275,7 +282,7 @@ class SyncPrimitivesApp {
             this.goroutines = payload.Goroutines || payload.goroutines;
         }
         if (payload.Events || payload.events) {
-            this.events = payload.Events || payload.events;
+            this.applyIncomingEvents(payload.Events || payload.events);
         }
         if (payload.Metrics || payload.metrics) {
             this.metrics = payload.Metrics || payload.metrics;
@@ -283,6 +290,17 @@ class SyncPrimitivesApp {
 
         this.markStateSynced();
         this.render();
+    }
+
+    applyIncomingEvents(nextEvents) {
+        this.events = Array.isArray(nextEvents) ? nextEvents : [];
+        if (!this.eventsPaused) {
+            this.pausedEvents = this.events.slice();
+            this.bufferedEventCount = 0;
+        } else {
+            this.bufferedEventCount = Math.max(0, this.events.length - this.pausedEvents.length);
+        }
+        this.updateEventStreamState();
     }
 
     requestFullRefresh() {
@@ -322,6 +340,10 @@ class SyncPrimitivesApp {
             const el = document.querySelector(selector);
             if (el) el.disabled = !connected;
         });
+        const optionInputs = document.querySelectorAll('#primitive-options input');
+        optionInputs.forEach((el) => {
+            el.disabled = !connected;
+        });
         this.render();
     }
 
@@ -337,6 +359,23 @@ class SyncPrimitivesApp {
         if (badge) {
             badge.textContent = `State synced ${new Date().toLocaleTimeString()}`;
         }
+    }
+
+    updateEventStreamState() {
+        const button = document.getElementById('events-pause-btn');
+        if (button) {
+            button.textContent = this.eventsPaused ? 'Resume stream' : 'Pause stream';
+        }
+
+        const chip = document.getElementById('events-buffer-chip');
+        if (!chip) return;
+        if (this.eventsPaused) {
+            chip.textContent = this.bufferedEventCount > 0
+                ? `Paused • ${this.bufferedEventCount} buffered`
+                : 'Paused';
+            return;
+        }
+        chip.textContent = 'Live';
     }
 
     initEventListeners() {
@@ -380,6 +419,54 @@ class SyncPrimitivesApp {
             });
         }
 
+        const primitiveSearch = document.getElementById('primitive-search');
+        if (primitiveSearch) {
+            primitiveSearch.addEventListener('input', (event) => {
+                this.primitiveQuery = event.target.value.trim().toLowerCase();
+                this.render();
+            });
+        }
+
+        const primitiveTypeFilter = document.getElementById('primitive-filter-type');
+        if (primitiveTypeFilter) {
+            primitiveTypeFilter.addEventListener('change', (event) => {
+                this.primitiveTypeFilter = event.target.value;
+                this.render();
+            });
+        }
+
+        const blockedOnly = document.getElementById('primitive-filter-blocked');
+        if (blockedOnly) {
+            blockedOnly.addEventListener('change', (event) => {
+                this.showBlockedOnly = event.target.checked;
+                this.render();
+            });
+        }
+
+        const eventSearch = document.getElementById('event-search');
+        if (eventSearch) {
+            eventSearch.addEventListener('input', (event) => {
+                this.eventQuery = event.target.value.trim().toLowerCase();
+                this.render();
+            });
+        }
+
+        const eventsPauseBtn = document.getElementById('events-pause-btn');
+        if (eventsPauseBtn) {
+            eventsPauseBtn.addEventListener('click', () => {
+                this.eventsPaused = !this.eventsPaused;
+                if (this.eventsPaused) {
+                    this.pausedEvents = this.events.slice();
+                    this.bufferedEventCount = 0;
+                } else {
+                    this.pausedEvents = this.events.slice();
+                    this.bufferedEventCount = 0;
+                }
+                this.updateEventStreamState();
+                this.render();
+            });
+        }
+
         // Stress test button
         const stressBtn = document.getElementById('stress-test-btn');
         if (stressBtn) {
@@ -402,7 +489,41 @@ class SyncPrimitivesApp {
             themeToggle.addEventListener('click', () => this.toggleTheme());
         }
 
+        document.addEventListener('keydown', (event) => {
+            const target = event.target;
+            const typingTarget = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+
+            if (event.key === '/' && !typingTarget) {
+                event.preventDefault();
+                const search = document.getElementById('primitive-search');
+                if (search) search.focus();
+                return;
+            }
+
+            if (event.key !== 'Escape') return;
+
+            if (document.activeElement && document.activeElement.id === 'primitive-search' && document.activeElement.value) {
+                document.activeElement.value = '';
+                this.primitiveQuery = '';
+                this.render();
+                return;
+            }
+
+            if (document.activeElement && document.activeElement.id === 'event-search' && document.activeElement.value) {
+                document.activeElement.value = '';
+                this.eventQuery = '';
+                this.render();
+                return;
+            }
+
+            if (this.selectedPrimitive) {
+                this.selectedPrimitive = null;
+                this.render();
+            }
+        });
+
         this.updatePrimitiveOptions();
+        this.updateEventStreamState();
         this.setInteractiveState(false);
     }
 
@@ -413,16 +534,11 @@ class SyncPrimitivesApp {
         optionsDiv.innerHTML = '';
         clearInlineError('capacity');
         clearInlineError('parties');
-        clearInlineError('wg-delta');
 
         if (type === 'semaphore') {
             optionsDiv.innerHTML = '<input type="number" id="capacity" placeholder="Capacity" value="10" min="1" />';
         } else if (type === 'barrier') {
             optionsDiv.innerHTML = '<input type="number" id="parties" placeholder="Parties" value="5" min="1" />';
-        } else if (type === 'waitgroup') {
-            optionsDiv.innerHTML = '<input type="number" id="wg-delta" placeholder="Add delta" value="1" min="1" />';
-        } else if (type === 'singleflight') {
-            optionsDiv.innerHTML = '<input type="text" id="sf-key" placeholder="Key" value="key1" />';
         }
     }
 
@@ -460,22 +576,56 @@ class SyncPrimitivesApp {
     }
 
     updateCounts() {
+        const visiblePrimitives = this.getVisiblePrimitives();
         const primCount = document.getElementById('prim-count');
         if (primCount) {
             primCount.textContent = String(Object.keys(this.primitives).length);
         }
+        const visiblePrimCount = document.getElementById('visible-prim-count');
+        if (visiblePrimCount) {
+            visiblePrimCount.textContent = `Showing ${visiblePrimitives.length}`;
+        }
 
+        const visibleEvents = this.getVisibleEvents();
         const eventCount = document.getElementById('event-count');
         if (eventCount) {
             eventCount.textContent = String(this.events.length);
         }
+        const visibleEventCount = document.getElementById('visible-event-count');
+        if (visibleEventCount) {
+            visibleEventCount.textContent = `Showing ${visibleEvents.length}`;
+        }
+    }
+
+    getVisiblePrimitives() {
+        const query = this.primitiveQuery;
+        const typeFilter = this.primitiveTypeFilter;
+        return Object.values(this.primitives)
+            .filter((prim) => {
+                if (typeFilter !== 'all' && String(prim.Type || '').toLowerCase() !== typeFilter) {
+                    return false;
+                }
+                if (this.showBlockedOnly && !(prim.BlockedCount > 0)) {
+                    return false;
+                }
+                if (!query) {
+                    return true;
+                }
+                const haystack = `${prim.Name || ''} ${prim.ID || ''} ${prim.Type || ''}`.toLowerCase();
+                return haystack.includes(query);
+            })
+            .sort((a, b) => {
+                const blockedDelta = (b.BlockedCount || 0) - (a.BlockedCount || 0);
+                if (blockedDelta !== 0) return blockedDelta;
+                return String(a.Name || '').localeCompare(String(b.Name || ''));
+            });
     }
 
     renderPrimitivesList() {
         const list = document.getElementById('primitives-list');
         list.innerHTML = '';
 
-        Object.values(this.primitives).forEach(prim => {
+        this.getVisiblePrimitives().forEach(prim => {
             const item = document.createElement('div');
             item.className = 'primitive-item';
             item.tabIndex = 0;
@@ -571,6 +721,11 @@ class SyncPrimitivesApp {
             empty.className = 'empty-message';
             empty.textContent = 'No primitives created';
             list.appendChild(empty);
+        } else if (list.childElementCount === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'empty-message';
+            empty.textContent = 'No primitives match the current filters';
+            list.appendChild(empty);
         }
     }
 
@@ -664,7 +819,7 @@ class SyncPrimitivesApp {
         const list = document.getElementById('events-list');
         list.innerHTML = '';
 
-        const recentEvents = this.events.slice(-30).reverse();
+        const recentEvents = this.getVisibleEvents().slice(-40).reverse();
 
         recentEvents.forEach(event => {
             const item = document.createElement('div');
@@ -690,9 +845,21 @@ class SyncPrimitivesApp {
         if (recentEvents.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'empty-message';
-            empty.textContent = 'No events';
+            empty.textContent = this.eventQuery ? 'No events match the current filter' : 'No events';
             list.appendChild(empty);
         }
+    }
+
+    getVisibleEvents() {
+        const source = this.eventsPaused ? this.pausedEvents : this.events;
+        if (!this.eventQuery) {
+            return source;
+        }
+        return source.filter((event) => {
+            const message = String(event.Message || '').toLowerCase();
+            const timestamp = String(event.Timestamp || '').toLowerCase();
+            return message.includes(this.eventQuery) || timestamp.includes(this.eventQuery);
+        });
     }
 
     renderMetrics() {
@@ -911,12 +1078,41 @@ class SyncPrimitivesApp {
             return card;
         };
 
+        const summary = document.createElement('div');
+        summary.className = 'stats-summary';
+        summary.appendChild(this.createSummaryChip(
+            prim.BlockedCount > 0 ? 'Blocked pressure' : 'Healthy',
+            prim.BlockedCount > 0 ? 'status-warning' : 'status-ok'
+        ));
+        summary.appendChild(this.createSummaryChip(`Namespace ${this.getNamespace()}`, 'status-accent'));
+        summary.appendChild(this.createSummaryChip(`Waiters ${prim.BlockedCount || 0}`, prim.BlockedCount > 0 ? 'status-warning' : ''));
+
+        const actionGrid = document.createElement('div');
+        actionGrid.className = 'action-grid';
+        this.renderPrimitiveControls(prim, actionGrid);
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'delete-btn';
+        deleteBtn.textContent = 'Delete primitive';
+        deleteBtn.disabled = !this.isConnected();
+        deleteBtn.addEventListener('click', () => this.deletePrimitive(prim.ID));
+        actionGrid.appendChild(deleteBtn);
+
         gridDiv.appendChild(makeCard('ID', prim.ID));
         gridDiv.appendChild(makeCard('Blocked Count', String(prim.BlockedCount || 0)));
         gridDiv.appendChild(makeCard('Created', new Date(prim.CreatedAt).toLocaleTimeString()));
 
         statsDiv.appendChild(headerDiv);
+        statsDiv.appendChild(summary);
+        statsDiv.appendChild(actionGrid);
         statsDiv.appendChild(gridDiv);
+    }
+
+    createSummaryChip(label, variant) {
+        const chip = document.createElement('span');
+        chip.className = `summary-chip ${variant}`.trim();
+        chip.textContent = label;
+        return chip;
     }
 
     renderPerPrimitiveMetrics(payload) {
@@ -1030,6 +1226,10 @@ class SyncPrimitivesApp {
         }, 200);
     }
 
+    deletePrimitive(id) {
+        this.send('deletePrimitive', { id });
+    }
+
     clearAll() {
         const now = Date.now();
         if (this.clearAllConfirmUntil < now) {
@@ -1117,8 +1317,4 @@ app.createPrimitive = function() {
     app.send(messageTypes[type], payload);
 
     document.getElementById('primitive-name').value = '';
-};
-
-app.deletePrimitive = function(id) {
-    this.send('deletePrimitive', { id });
 };

@@ -293,6 +293,14 @@ button:active {
     transform: translateY(0);
 }
 
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+.primitive-item:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+}
+
 button:disabled,
 select:disabled,
 input:disabled {
@@ -304,6 +312,12 @@ input:disabled {
 
 .tool-btn {
     background: linear-gradient(135deg, var(--success) 0%, var(--tool-success-alt) 100%);
+}
+
+.tool-btn.secondary {
+    background: linear-gradient(135deg, var(--surface-subtle) 0%, var(--surface-track) 100%);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
 }
 
 .tool-btn.danger {
@@ -368,6 +382,44 @@ input:disabled {
     font-weight: bold;
 }
 
+.count-badge.subtle {
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+.panel-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.panel-tools input[type="text"],
+.panel-tools select {
+    min-width: 160px;
+    flex: 1 1 180px;
+}
+
+.toggle-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 999px;
+    background: var(--surface-subtle);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.toggle-chip input {
+    accent-color: var(--accent);
+}
+
 .primitives-list, .goroutines-list, .events-list {
     max-height: 400px;
     overflow-y: auto;
@@ -404,6 +456,10 @@ input:disabled {
     border-left-color: var(--warning);
     background: color-mix(in srgb, var(--warning) 18%, var(--surface) 82%);
     box-shadow: var(--warning-glow);
+}
+
+.primitive-item:focus-visible {
+    border-left-color: var(--accent);
 }
 
 .primitive-header {
@@ -545,6 +601,54 @@ input:disabled {
 .stats-header h3 {
     color: var(--accent);
     margin-bottom: 15px;
+}
+
+.stats-summary,
+.action-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.summary-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    border: 1px solid var(--border);
+    background: var(--surface-muted);
+    color: var(--text-secondary);
+}
+
+.summary-chip.status-ok {
+    background: color-mix(in srgb, var(--success) 18%, var(--surface) 82%);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 40%, var(--border) 60%);
+}
+
+.summary-chip.status-warning {
+    background: color-mix(in srgb, var(--warning) 18%, var(--surface) 82%);
+    color: color-mix(in srgb, var(--warning) 70%, var(--text-primary) 30%);
+    border-color: color-mix(in srgb, var(--warning) 38%, var(--border) 62%);
+}
+
+.summary-chip.status-accent {
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface) 82%);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 38%, var(--border) 62%);
+}
+
+.action-grid .control-btn,
+.action-grid .delete-btn {
+    margin: 0;
+}
+
+.action-grid .delete-btn {
+    width: auto;
 }
 
 .stats-grid {
@@ -729,6 +833,31 @@ canvas {
 
     .primitive-stats {
         grid-template-columns: 1fr;
+    }
+
+    .panel-tools {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .toggle-chip {
+        justify-content: center;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+
+    button:hover,
+    .primitive-item:hover {
+        transform: none;
     }
 }
 
