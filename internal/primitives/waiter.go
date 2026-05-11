@@ -12,8 +12,12 @@ type Waiter struct {
 	ID        uint64
 	Ready     chan struct{}
 	CreatedAt time.Time
-	cancelled atomic.Bool           // set to true when the waiter has self-acquired the lock
-	next      atomic.Pointer[Waiter] // intrusive link used by WaiterQueue
+	cancelled atomic.Bool // set to true when the waiter has self-acquired the lock
+}
+
+type waiterNode struct {
+	waiter *Waiter
+	next   atomic.Pointer[waiterNode]
 }
 
 // WaiterQueue manages a queue of waiting goroutines using the Michael-Scott
@@ -21,8 +25,8 @@ type Waiter struct {
 // The sentinel eliminates the race between head CAS and tail.Store that
 // existed in the original empty-queue Enqueue path.
 type WaiterQueue struct {
-	head atomic.Pointer[Waiter]
-	tail atomic.Pointer[Waiter]
+	head atomic.Pointer[waiterNode]
+	tail atomic.Pointer[waiterNode]
 	size atomic.Int64
 }
 
@@ -51,7 +55,6 @@ func getWaiter() *Waiter {
 	w.ID = waiterIDCounter.Add(1)
 	w.CreatedAt = time.Now()
 	w.cancelled.Store(false)
-	w.next.Store(nil)
 	return w
 }
 
@@ -65,7 +68,6 @@ func putWaiter(w *Waiter) {
 	default:
 	}
 	w.cancelled.Store(false)
-	w.next.Store(nil)
 	waiterPool.Put(w)
 }
 
@@ -77,7 +79,7 @@ func NewWaiter() *Waiter {
 // NewWaiterQueue creates a new waiter queue with a sentinel node.
 // The sentinel is never returned by Dequeue; it just anchors the list.
 func NewWaiterQueue() *WaiterQueue {
-	sentinel := &Waiter{} // dummy head node
+	sentinel := &waiterNode{} // dummy head node
 	q := &WaiterQueue{}
 	q.head.Store(sentinel)
 	q.tail.Store(sentinel)
@@ -86,7 +88,7 @@ func NewWaiterQueue() *WaiterQueue {
 
 // Enqueue adds a waiter to the queue using the Michael-Scott algorithm.
 func (q *WaiterQueue) Enqueue(w *Waiter) {
-	w.next.Store(nil)
+	node := &waiterNode{waiter: w}
 	for {
 		tail := q.tail.Load()
 		next := tail.next.Load()
@@ -95,10 +97,10 @@ func (q *WaiterQueue) Enqueue(w *Waiter) {
 			continue
 		}
 		if next == nil {
-			// Tail is the true last node; try to link w after it
-			if tail.next.CompareAndSwap(nil, w) {
+			// Tail is the true last node; try to link node after it.
+			if tail.next.CompareAndSwap(nil, node) {
 				// Link succeeded; try to advance tail (if it fails, next Enqueue fixes it)
-				q.tail.CompareAndSwap(tail, w)
+				q.tail.CompareAndSwap(tail, node)
 				q.size.Add(1)
 				return
 			}
@@ -134,13 +136,14 @@ func (q *WaiterQueue) Dequeue() *Waiter {
 		item := next
 		if q.head.CompareAndSwap(head, next) {
 			q.size.Add(-1)
+			waiter := item.waiter
 			// Skip cancelled waiters: if this waiter cancelled itself, discard
 			// and loop to get the next one.
-			if item.cancelled.Load() {
-				putWaiter(item)
+			if waiter.cancelled.Load() {
+				putWaiter(waiter)
 				continue
 			}
-			return item
+			return waiter
 		}
 	}
 }
