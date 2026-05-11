@@ -29,7 +29,7 @@ This library implements eight fundamental synchronization primitives entirely fr
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CLIENT LAYER                             │
 │  Browser Dashboard (Canvas + WebSocket JS)                      │
-│  Prometheus Scraper   CLI (future)   Go SDK (future)            │
+│  Prometheus Scraper   syncctl CLI   Go SDK client               │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ WebSocket / HTTP
 ┌───────────────────────────▼─────────────────────────────────────┐
@@ -113,7 +113,7 @@ This library implements eight fundamental synchronization primitives entirely fr
 ### Snapshot Persistence
 - Optional JSON file persistence via `Config.SnapshotPath`
 - State saved on graceful shutdown; loaded on startup
-- Per-connection isolation: each WebSocket connection manages its own primitive namespace
+- Snapshot files persist namespace-scoped primitive state across restarts
 
 ### Security
 - TLS via `Config.TLSCertFile` / `Config.TLSKeyFile`
