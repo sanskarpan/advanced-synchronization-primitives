@@ -1135,6 +1135,51 @@ func TestHealthzMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHealthzIncludesCustomHistogramBuckets(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins:    []string{"*"},
+		HistogramBuckets:  []time.Duration{time.Millisecond, 10 * time.Millisecond},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", srv.HandleHealthz)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /healthz: %v", err)
+	}
+
+	rawBuckets, ok := body["histogram_buckets"].([]interface{})
+	if !ok || len(rawBuckets) != 2 {
+		t.Fatalf("expected 2 histogram buckets in healthz, got: %#v", body["histogram_buckets"])
+	}
+	if rawBuckets[0] != "1ms" || rawBuckets[1] != "10ms" {
+		t.Fatalf("unexpected histogram buckets: %#v", rawBuckets)
+	}
+}
+
+func TestInvalidHistogramBucketsPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for non-ascending histogram buckets")
+		}
+	}()
+	web.NewServerWithConfig(web.Config{
+		HistogramBuckets: []time.Duration{
+			10 * time.Millisecond,
+			1 * time.Millisecond,
+		},
+	})
+}
+
 // TestReadyzOK verifies that GET /readyz returns 200.
 func TestReadyzOK(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
