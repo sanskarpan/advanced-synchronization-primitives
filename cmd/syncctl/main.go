@@ -427,6 +427,7 @@ func dial(ctx context.Context, cfg config) (*websocket.Conn, error) {
 		dialer.HandshakeTimeout = cfg.timeout
 	}
 	if cfg.insecure {
+		// #nosec G402 -- this is only enabled by the explicit --insecure CLI flag.
 		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
