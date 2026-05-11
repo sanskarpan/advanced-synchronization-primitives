@@ -10,10 +10,7 @@ This file tracks only work that is still open on `origin/main`. Historical ticke
 
 ## Open Backlog
 
-### P2 — Product and Packaging
-
-- [ ] **Dark mode for dashboard** — add theme variables, persistence, and `prefers-color-scheme` defaults. Ticket: TICKET-011.
-- [ ] **Kubernetes manifests** — create deployment manifests for the server, service, autoscaling, and metrics scraping. Ticket: TICKET-015.
+No open tracked backlog tickets remain on `origin/main` right now.
 
 ---
 
@@ -33,9 +30,11 @@ This file tracks only work that is still open on `origin/main`. Historical ticke
 
 ### Primitives, SDK, and CLI
 
+- [x] Dark mode dashboard with persisted theme preference and `prefers-color-scheme` defaults. Ticket: TICKET-011.
 - [x] Fair FIFO `FairRWLock` primitive exposed through the server and UI. Ticket: TICKET-012.
 - [x] Go SDK client in `pkg/client`. Ticket: TICKET-013.
 - [x] `syncctl` CLI, including token generation support. Ticket: TICKET-014.
+- [x] Kubernetes deployment manifests for production-style rollout, autoscaling, and metrics scraping. Ticket: TICKET-015.
 
 ### Authentication, Multi-Tenancy, and Auditability
 

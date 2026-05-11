@@ -43,18 +43,14 @@ This roadmap reflects the repository's shipped state on `origin/main` and the re
 
 ## Remaining Open Work
 
-### Near-term backlog
-
-1. `TICKET-011` — dark mode and theme persistence for the dashboard.
-2. `TICKET-015` — Kubernetes deployment manifests and related packaging.
+No open tracked tickets remain on `origin/main` right now. The repository has moved from closing planned ticket gaps to general product iteration and packaging refinements.
 
 ### Still valuable, but not currently tracked as active tickets
 
 1. Better example programs for realistic concurrency patterns.
-2. Environment-variable configuration parity with CLI flags.
-3. Frontend UX improvements beyond dark mode: responsiveness, accessibility, export flows, and connection-quality indicators.
-4. Packaging follow-ups such as a Helm chart.
-5. Longer-horizon scale-out work such as shared-state backends and deeper memory profiling.
+2. Frontend UX improvements beyond dark mode: responsiveness, accessibility, export flows, and connection-quality indicators.
+3. Packaging follow-ups such as a Helm chart.
+4. Longer-horizon scale-out work such as shared-state backends and deeper memory profiling.
 
 ---
 

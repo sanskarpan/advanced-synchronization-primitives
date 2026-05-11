@@ -8,4 +8,12 @@ metadata:
 data:
   SYNCPRIM_ADDR: ":8085"
   SYNCPRIM_ALLOWED_ORIGINS: ""
+  SYNCPRIM_DEFAULT_NAMESPACE: "default"
+  SYNCPRIM_MAX_CONNS: "1000"
+  SYNCPRIM_AUDIT_LOG_MAX_BYTES: "10485760"
+  SYNCPRIM_AUDIT_LOG_KEEP_FILES: "3"
+  # Uncomment to enable snapshot persistence once the PVC is mounted in the Deployment.
+  # SYNCPRIM_SNAPSHOT_PATH: "/data/snapshot.json"
+  # Uncomment to persist audit logs once a writable volume is mounted.
+  # SYNCPRIM_AUDIT_LOG_PATH: "/data/audit.jsonl"
   LOG_FORMAT: "json"

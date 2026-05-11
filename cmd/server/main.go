@@ -22,6 +22,11 @@ func main() {
 	apiKey := flag.String("api-key", "", "WebSocket API key (empty = no authentication required)")
 	jwtSecret := flag.String("jwt-secret", "", "HS256 JWT secret for WebSocket Bearer authentication")
 	defaultNamespace := flag.String("default-namespace", "default", "Default namespace for unauthenticated or namespace-less clients")
+	maxConns := flag.Int("max-conns", 0, "Maximum concurrent WebSocket connections (0 = default)")
+	snapshotPath := flag.String("snapshot-path", "", "Optional path for snapshot persistence")
+	auditLogPath := flag.String("audit-log-path", "", "Optional path for NDJSON audit log output")
+	auditLogMaxBytes := flag.Int64("audit-log-max-bytes", 0, "Rotate audit log after this many bytes (0 = disabled)")
+	auditLogKeepFiles := flag.Int("audit-log-keep-files", 0, "Number of rotated audit log files to retain")
 	disableCompression := flag.Bool("disable-compression", false, "Disable WebSocket permessage-deflate compression")
 	flag.Parse()
 
@@ -54,6 +59,11 @@ func main() {
 		APIKey:             *apiKey,
 		JWTSecret:          *jwtSecret,
 		DefaultNamespace:   *defaultNamespace,
+		MaxConns:           *maxConns,
+		SnapshotPath:       *snapshotPath,
+		AuditLogPath:       *auditLogPath,
+		AuditLogMaxBytes:   *auditLogMaxBytes,
+		AuditLogKeepFiles:  *auditLogKeepFiles,
 		DisableCompression: *disableCompression,
 	}
 

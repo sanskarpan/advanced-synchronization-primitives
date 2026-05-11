@@ -81,7 +81,8 @@ class SyncPrimitivesApp {
             textInverse: this.cssVar('--text-inverse', '#fff'),
             track: this.cssVar('--surface-track', '#f5f5f5'),
             blocked: this.cssVar('--danger', '#f44336'),
-            selected: this.cssVar('--warning', '#ffd700')
+            selected: this.cssVar('--warning', '#ffd700'),
+            finished: this.cssVar('--text-muted', '#9e9e9e')
         };
         this.typeColors = {
             'RWLock': this.cssVar('--type-rwlock', '#2196f3'),
@@ -701,7 +702,7 @@ class SyncPrimitivesApp {
             ctx.arc(x + width - 20, y + height - 20, badgeSize / 2, 0, 2 * Math.PI);
             ctx.fill();
 
-            ctx.fillStyle = 'white';
+            ctx.fillStyle = this.canvasTheme.textInverse;
             ctx.font = 'bold 12px sans-serif';
             ctx.textAlign = 'center';
             ctx.fillText(prim.BlockedCount, x + width - 20, y + height - 16);
@@ -748,7 +749,7 @@ class SyncPrimitivesApp {
                 'Running': this.cssVar('--success', '#4caf50'),
                 'Blocked': this.cssVar('--danger', '#f44336'),
                 'Waiting': this.cssVar('--warning', '#ff9800'),
-                'Finished': this.cssVar('--text-muted', '#9e9e9e')
+                'Finished': this.canvasTheme.finished
             };
 
             const barWidth = canvas.width * 0.85;
