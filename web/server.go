@@ -1287,6 +1287,16 @@ func clampHoldMs(ms int) (time.Duration, string) {
 	return time.Duration(ms) * time.Millisecond, ""
 }
 
+func clampWaiterCount(v int64) int32 {
+	if v < 0 {
+		return 0
+	}
+	if v > int64(^uint32(0)>>1) {
+		return int32(^uint32(0) >> 1)
+	}
+	return int32(v)
+}
+
 func validateHistogramBuckets(buckets []time.Duration) {
 	if len(buckets) == 0 {
 		return
@@ -1432,7 +1442,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
 				s.metricsCollector.RecordAcquire(payload.ID, 1)
-				s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(fairrwlock.GetStats().WaitersQueued))
+					s.metricsCollector.RecordWait(payload.ID, time.Since(start), clampWaiterCount(fairrwlock.GetStats().WaitersQueued))
 				go func() {
 					select {
 					case <-baseOpCtx.Done():
