@@ -426,7 +426,7 @@ func runStats(cfg config, args []string, stdout io.Writer) (int, error) {
 
 func runToken(args []string, stdout io.Writer) (int, error) {
 	if len(args) == 0 || args[0] != "generate" {
-		return 2, &commandError{Code: 2, Msg: "usage: syncctl token generate --secret <secret> --sub <subject> [--role <role>] [--ttl <dur>]"}
+		return 2, &commandError{Code: 2, Msg: "usage: syncctl token generate --secret <secret> --sub <subject> [--role <role>] [--namespace <ns>] [--ttl <dur>]"}
 	}
 
 	fs := flag.NewFlagSet("token generate", flag.ContinueOnError)
@@ -434,6 +434,7 @@ func runToken(args []string, stdout io.Writer) (int, error) {
 	secret := fs.String("secret", "", "HS256 signing secret")
 	sub := fs.String("sub", "", "JWT subject")
 	role := fs.String("role", "", "JWT role claim")
+	namespace := fs.String("namespace", "", "JWT namespace claim")
 	ttl := fs.Duration("ttl", time.Hour, "Token lifetime")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2, &commandError{Code: 2, Msg: err.Error()}
@@ -450,10 +451,11 @@ func runToken(args []string, stdout io.Writer) (int, error) {
 
 	now := time.Now()
 	token, err := auth.GenerateJWT(auth.Claims{
-		Sub:  *sub,
-		Role: *role,
-		Iat:  now.Unix(),
-		Exp:  now.Add(*ttl).Unix(),
+		Sub:       *sub,
+		Role:      *role,
+		Namespace: *namespace,
+		Iat:       now.Unix(),
+		Exp:       now.Add(*ttl).Unix(),
 	}, *secret)
 	if err != nil {
 		return 1, &commandError{Code: 1, Msg: err.Error()}
