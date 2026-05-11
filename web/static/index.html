@@ -76,7 +76,28 @@
         <div class="main-content">
             <div class="left-panel">
                 <div class="section">
-                    <h2>Primitives <span class="count-badge" id="prim-count">0</span></h2>
+                    <h2>Primitives <span class="count-badge" id="prim-count">0</span> <span class="count-badge subtle" id="visible-prim-count">Showing 0</span></h2>
+                    <div class="panel-tools" aria-label="Primitive filters">
+                        <label class="sr-only" for="primitive-search">Search primitives</label>
+                        <input type="text" id="primitive-search" placeholder="Search name or ID" />
+                        <label class="sr-only" for="primitive-filter-type">Filter primitive type</label>
+                        <select id="primitive-filter-type">
+                            <option value="all">All types</option>
+                            <option value="rwlock">RWLock</option>
+                            <option value="fairrwlock">FairRWLock</option>
+                            <option value="semaphore">Semaphore</option>
+                            <option value="mutex">Mutex</option>
+                            <option value="condvar">Condition Variable</option>
+                            <option value="barrier">Barrier</option>
+                            <option value="waitgroup">WaitGroup</option>
+                            <option value="once">Once</option>
+                            <option value="singleflight">Singleflight</option>
+                        </select>
+                        <label class="toggle-chip" for="primitive-filter-blocked">
+                            <input type="checkbox" id="primitive-filter-blocked" />
+                            <span>Blocked only</span>
+                        </label>
+                    </div>
                     <div id="primitives-list" class="primitives-list" role="list" aria-label="Primitive list">
                         <!-- Primitives will be added here -->
                     </div>
@@ -137,7 +158,13 @@
                 </div>
 
                 <div class="section">
-                    <h2>Events <span class="count-badge" id="event-count">0</span></h2>
+                    <h2>Events <span class="count-badge" id="event-count">0</span> <span class="count-badge subtle" id="visible-event-count">Showing 0</span></h2>
+                    <div class="panel-tools" aria-label="Event controls">
+                        <label class="sr-only" for="event-search">Search events</label>
+                        <input type="text" id="event-search" placeholder="Filter events" />
+                        <button id="events-pause-btn" class="tool-btn secondary" type="button">Pause stream</button>
+                        <span class="meta-chip" id="events-buffer-chip">Live</span>
+                    </div>
                     <div id="events-list" class="events-list" role="log" aria-live="polite" aria-label="Recent events">
                         <!-- Events will be added here -->
                     </div>
