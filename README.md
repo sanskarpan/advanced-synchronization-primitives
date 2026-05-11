@@ -119,6 +119,8 @@ This library implements eight fundamental synchronization primitives entirely fr
 - TLS via `Config.TLSCertFile` / `Config.TLSKeyFile`
 - Origin allowlist via `Config.AllowedOrigins` (empty = localhost only, `["*"]` = all)
 - API key authentication via `Authorization: Bearer <key>` header
+- Optional HS256 JWT authentication via `Config.JWTSecret`
+- JWT roles: `admin` can create/delete/operate, `operator` can operate existing primitives, `viewer` is read-only
 - Per-connection sliding-window rate limit: 200 messages/second
 - Connection cap: `Config.MaxConns` (default 1000)
 - HTTP server timeouts: ReadHeader=5 s, Read=10 s, Write=30 s, Idle=120 s
@@ -506,6 +508,7 @@ All WebSocket messages are JSON objects with a `type` string field and a `payloa
 | `TLSCertFile` | `string` | `""` | Path to TLS certificate PEM file. Both cert and key must be set to enable TLS. |
 | `TLSKeyFile` | `string` | `""` | Path to TLS private key PEM file. |
 | `APIKey` | `string` | `""` | When non-empty, clients must send `Authorization: Bearer <key>`. |
+| `JWTSecret` | `string` | `""` | When non-empty, clients must send an HS256 Bearer JWT. Missing or unknown JWT roles fall back to `viewer`. |
 | `MaxConns` | `int` | `1000` | Maximum simultaneous WebSocket connections. |
 | `SnapshotPath` | `string` | `""` | File path for JSON state persistence. Empty disables persistence. |
 

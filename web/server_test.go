@@ -41,8 +41,13 @@ func newTestServer(t *testing.T) (*httptest.Server, *web.Server, func()) {
 func dialWS(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	t.Helper()
 	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	return dialWSWithHeaders(t, u, nil)
+}
+
+func dialWSWithHeaders(t *testing.T, url string, headers http.Header) *websocket.Conn {
+	t.Helper()
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.Dial(u, nil)
+	conn, _, err := dialer.Dial(url, headers)
 	if err != nil {
 		t.Fatalf("WS dial failed: %v", err)
 	}
@@ -634,6 +639,125 @@ func mustJWT(t *testing.T, secret, sub, role string, exp time.Time) string {
 		t.Fatalf("generate JWT: %v", err)
 	}
 	return token
+}
+
+func TestViewerCannotCreatePrimitive(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "jwt-secret", "viewer-user", "viewer", time.Now().Add(time.Hour))
+	conn := dialWSWithHeaders(t, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", http.Header{
+		"Authorization": []string{"Bearer " + token},
+	})
+	defer conn.Close()
+	readMsg(t, conn)
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "viewer-mu", "name": "viewer-mu"})
+	msg := drainUntilType(t, conn, "error")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if got := payload["message"]; got != "forbidden: create operations require admin role" {
+		t.Fatalf("unexpected error message: %v", got)
+	}
+}
+
+func TestViewerCannotCallPrimitiveOp(t *testing.T) {
+	snapshotPath := filepath.Join(t.TempDir(), "viewer-snapshot.json")
+	writeSnapshot(t, snapshotPath, []map[string]interface{}{
+		{"id": "rbac-mu", "type": "Mutex", "name": "rbac-mu"},
+	})
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+		SnapshotPath:   snapshotPath,
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "jwt-secret", "viewer-user", "viewer", time.Now().Add(time.Hour))
+	conn := dialWSWithHeaders(t, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", http.Header{
+		"Authorization": []string{"Bearer " + token},
+	})
+	defer conn.Close()
+	readMsg(t, conn)
+
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{"id": "rbac-mu", "op": "lock"})
+	msg := drainUntilType(t, conn, "error")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if got := payload["message"]; got != "forbidden: operations not permitted for viewer role" {
+		t.Fatalf("unexpected error message: %v", got)
+	}
+}
+
+func TestAdminCanManagePrimitiveLifecycle(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "jwt-secret", "admin-user", "admin", time.Now().Add(time.Hour))
+	conn := dialWSWithHeaders(t, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", http.Header{
+		"Authorization": []string{"Bearer " + token},
+	})
+	defer conn.Close()
+	readMsg(t, conn)
+
+	sendMsg(t, conn, "createMutex", map[string]string{"id": "admin-mu", "name": "admin-mu"})
+	drainUntilType(t, conn, "success")
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{"id": "admin-mu", "op": "lock", "holdMs": 1})
+	drainUntilType(t, conn, "success")
+	sendMsg(t, conn, "deletePrimitive", map[string]string{"id": "admin-mu"})
+	drainUntilType(t, conn, "success")
+}
+
+func TestUnknownRoleDefaultsToViewer(t *testing.T) {
+	srv := web.NewServerWithConfig(web.Config{
+		AllowedOrigins: []string{"*"},
+		JWTSecret:      "jwt-secret",
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	token := mustJWT(t, "jwt-secret", "odd-user", "superuser", time.Now().Add(time.Hour))
+	conn := dialWSWithHeaders(t, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", http.Header{
+		"Authorization": []string{"Bearer " + token},
+	})
+	defer conn.Close()
+	readMsg(t, conn)
+
+	sendMsg(t, conn, "primitiveOp", map[string]interface{}{"id": "rbac-mu", "op": "lock"})
+	msg := drainUntilType(t, conn, "error")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if got := payload["message"]; got != "forbidden: operations not permitted for viewer role" {
+		t.Fatalf("unexpected error message: %v", got)
+	}
+}
+
+func writeSnapshot(t *testing.T, path string, primitives []map[string]interface{}) {
+	t.Helper()
+	data, err := json.Marshal(map[string]interface{}{
+		"version":    1,
+		"primitives": primitives,
+	})
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
 }
 
 func TestWebSocketCompressionEnabledByDefault(t *testing.T) {
