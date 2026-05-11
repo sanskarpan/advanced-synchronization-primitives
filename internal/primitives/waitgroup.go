@@ -80,6 +80,7 @@ func (wg *WaitGroup) Wait() {
 	}
 
 	waiter.Wait()
+	putWaiter(waiter)
 }
 
 // WaitContext blocks until the counter is zero or ctx is cancelled.
@@ -99,7 +100,11 @@ func (wg *WaitGroup) WaitContext(ctx context.Context) error {
 		return nil
 	}
 
-	return waiter.WaitContext(ctx)
+	if err := waiter.WaitContext(ctx); err != nil {
+		return err
+	}
+	putWaiter(waiter)
+	return nil
 }
 
 // GetCount returns the current counter value.
