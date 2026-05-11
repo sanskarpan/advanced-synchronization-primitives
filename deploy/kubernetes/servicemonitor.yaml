@@ -1,0 +1,16 @@
+# Requires Prometheus Operator CRDs (monitoring.coreos.com/v1).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: syncprimitives
+  labels:
+    app: syncprimitives
+spec:
+  selector:
+    matchLabels:
+      app: syncprimitives
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
