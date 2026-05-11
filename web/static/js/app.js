@@ -20,6 +20,10 @@ class SyncPrimitivesApp {
         this.typeColors = {};
         this.lastSequence = 0;
         this.currentNamespace = this.getInitialNamespace();
+        this.connectionState = 'connecting';
+        this.reconnectDelay = 1000;
+        this.reconnectTimer = null;
+        this.clearAllConfirmUntil = 0;
 
         this.initTheme();
         this.initCanvas();
@@ -60,6 +64,7 @@ class SyncPrimitivesApp {
         this.safeStorageSet(this.namespaceKey, this.currentNamespace);
         const input = document.getElementById('namespace-input');
         if (input) input.value = this.currentNamespace;
+        this.updateNamespaceBadge();
     }
 
     getPreferredTheme() {
@@ -140,6 +145,10 @@ class SyncPrimitivesApp {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ns = encodeURIComponent(this.getNamespace());
         const wsUrl = `${protocol}//${window.location.host}/ws?ns=${ns}`;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
 
         this.updateStatus('connecting');
         this.ws = new WebSocket(wsUrl);
@@ -148,11 +157,18 @@ class SyncPrimitivesApp {
             console.log('WebSocket connected');
             this.reconnectDelay = 1000; // reset backoff on successful connect
             this.updateStatus('connected');
+            this.setInteractiveState(true);
         };
 
-        this.ws.onclose = () => {
+        this.ws.onclose = (event) => {
             console.log('WebSocket disconnected');
             this.updateStatus('disconnected');
+            this.setInteractiveState(false);
+            if (event && event.code === 1001) {
+                this.showNotification('Server is restarting. Reconnecting shortly.', 'warning', 5000);
+                this.scheduleReconnect(10000);
+                return;
+            }
             this.scheduleReconnect();
         };
 
@@ -168,12 +184,18 @@ class SyncPrimitivesApp {
     }
 
     scheduleReconnect() {
+        this.scheduleReconnectIn();
+    }
+
+    scheduleReconnectIn(delayOverride) {
         if (!this.reconnectDelay) this.reconnectDelay = 1000;
-        const delay = this.reconnectDelay;
-        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // cap at 30s
+        const delay = delayOverride || this.reconnectDelay;
+        if (!delayOverride) {
+            this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // cap at 30s
+        }
         console.log(`Reconnecting in ${delay}ms...`);
         this.showNotification(`Reconnecting in ${Math.round(delay/1000)}s...`, 'info');
-        setTimeout(() => this.connect(), delay);
+        this.reconnectTimer = setTimeout(() => this.connect(), delay);
     }
 
     handleMessage(message) {
@@ -190,6 +212,9 @@ class SyncPrimitivesApp {
             case 'success':
                 console.log('Success:', message.payload.message);
                 this.showNotification(message.payload.message, 'success');
+                if (message.payload.warning) {
+                    this.showNotification(message.payload.warning, 'warning', 5000);
+                }
                 break;
             case 'error':
                 // F3: show server errors as visible toast notifications
@@ -216,6 +241,7 @@ class SyncPrimitivesApp {
             this.lastSequence = sequence;
         }
 
+        this.markStateSynced();
         this.render();
     }
 
@@ -255,6 +281,7 @@ class SyncPrimitivesApp {
             this.metrics = payload.Metrics || payload.metrics;
         }
 
+        this.markStateSynced();
         this.render();
     }
 
@@ -262,10 +289,11 @@ class SyncPrimitivesApp {
         this.send('requestFullRefresh', {});
     }
 
-    updateStatus(status) {
+    updateStatus(status, messageOverride) {
         const indicator = document.getElementById('status-indicator');
         const text = document.getElementById('status-text');
 
+        this.connectionState = status;
         indicator.className = 'status-indicator ' + status;
 
         const statusText = {
@@ -274,11 +302,46 @@ class SyncPrimitivesApp {
             'connecting': 'Reconnecting...'
         };
 
-        text.textContent = statusText[status] || 'Unknown';
+        text.textContent = messageOverride || statusText[status] || 'Unknown';
+    }
+
+    isConnected() {
+        return this.ws && this.ws.readyState === WebSocket.OPEN;
+    }
+
+    setInteractiveState(connected) {
+        const selectors = [
+            '#primitive-type',
+            '#primitive-name',
+            '#create-btn',
+            '#stress-test-btn',
+            '#get-metrics-btn',
+            '#clear-all-btn'
+        ];
+        selectors.forEach((selector) => {
+            const el = document.querySelector(selector);
+            if (el) el.disabled = !connected;
+        });
+        this.render();
+    }
+
+    updateNamespaceBadge() {
+        const badge = document.getElementById('namespace-badge');
+        if (badge) {
+            badge.textContent = `Namespace: ${this.getNamespace()}`;
+        }
+    }
+
+    markStateSynced() {
+        const badge = document.getElementById('sync-badge');
+        if (badge) {
+            badge.textContent = `State synced ${new Date().toLocaleTimeString()}`;
+        }
     }
 
     initEventListeners() {
         this.setNamespace(this.getNamespace());
+        this.updateNamespaceBadge();
         const typeSelect = document.getElementById('primitive-type');
         typeSelect.addEventListener('change', () => this.updatePrimitiveOptions());
 
@@ -286,14 +349,18 @@ class SyncPrimitivesApp {
         const namespaceApplyBtn = document.getElementById('namespace-apply-btn');
         if (namespaceApplyBtn) {
             namespaceApplyBtn.addEventListener('click', () => {
-                this.setNamespace(namespaceInput.value);
+                const nextNamespace = namespaceInput.value.trim();
+                if (!this.validateNamespace(nextNamespace || 'default')) return;
+                this.setNamespace(nextNamespace);
                 if (this.ws) this.ws.close();
             });
         }
         if (namespaceInput) {
             namespaceInput.addEventListener('keydown', (event) => {
                 if (event.key === 'Enter') {
-                    this.setNamespace(namespaceInput.value);
+                    const nextNamespace = namespaceInput.value.trim();
+                    if (!this.validateNamespace(nextNamespace || 'default')) return;
+                    this.setNamespace(nextNamespace);
                     if (this.ws) this.ws.close();
                 }
             });
@@ -336,6 +403,7 @@ class SyncPrimitivesApp {
         }
 
         this.updatePrimitiveOptions();
+        this.setInteractiveState(false);
     }
 
     updatePrimitiveOptions() {
@@ -343,6 +411,9 @@ class SyncPrimitivesApp {
         const optionsDiv = document.getElementById('primitive-options');
 
         optionsDiv.innerHTML = '';
+        clearInlineError('capacity');
+        clearInlineError('parties');
+        clearInlineError('wg-delta');
 
         if (type === 'semaphore') {
             optionsDiv.innerHTML = '<input type="number" id="capacity" placeholder="Capacity" value="10" min="1" />';
@@ -358,7 +429,23 @@ class SyncPrimitivesApp {
     send(type, payload) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ type, payload }));
+            return true;
         }
+        this.showNotification('Action unavailable while disconnected.', 'warning');
+        return false;
+    }
+
+    validateNamespace(namespace) {
+        if (namespace.length > 256) {
+            showInlineError('namespace-input', 'Namespace must not exceed 256 characters');
+            return false;
+        }
+        if (namespace.includes('/')) {
+            showInlineError('namespace-input', 'Namespace must not contain "/"');
+            return false;
+        }
+        clearInlineError('namespace-input');
+        return true;
     }
 
     render() {
@@ -391,6 +478,8 @@ class SyncPrimitivesApp {
         Object.values(this.primitives).forEach(prim => {
             const item = document.createElement('div');
             item.className = 'primitive-item';
+            item.tabIndex = 0;
+            item.setAttribute('role', 'listitem');
             if (this.selectedPrimitive === prim.ID) {
                 item.classList.add('selected');
             }
@@ -451,6 +540,7 @@ class SyncPrimitivesApp {
             deleteBtn.className = 'delete-btn';
             deleteBtn.textContent = 'Delete';
             deleteBtn.dataset.id = prim.ID;
+            deleteBtn.disabled = !this.isConnected();
             deleteBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.deletePrimitive(prim.ID);
@@ -463,6 +553,12 @@ class SyncPrimitivesApp {
 
             item.addEventListener('click', (e) => {
                 if (!e.target.classList.contains('delete-btn') && !e.target.closest('.primitive-controls')) {
+                    this.selectPrimitive(prim.ID);
+                }
+            });
+            item.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
                     this.selectPrimitive(prim.ID);
                 }
             });
@@ -486,6 +582,7 @@ class SyncPrimitivesApp {
             const btn = document.createElement('button');
             btn.className = 'control-btn';
             btn.textContent = label;
+            btn.disabled = !this.isConnected();
             btn.dataset.id = prim.ID; // stored in dataset, not interpolated into HTML
             btn.dataset.op = op;
             btn.addEventListener('click', () => {
@@ -530,6 +627,7 @@ class SyncPrimitivesApp {
 
         Object.values(this.goroutines).forEach(g => {
             const item = document.createElement('div');
+            item.setAttribute('role', 'listitem');
             // g.State comes from server; validate against known states before use as class
             const knownStates = ['running', 'blocked', 'waiting', 'finished'];
             const safeStateClass = knownStates.includes((g.State || '').toLowerCase())
@@ -571,6 +669,7 @@ class SyncPrimitivesApp {
         recentEvents.forEach(event => {
             const item = document.createElement('div');
             item.className = 'event-item';
+            item.setAttribute('role', 'article');
 
             // event.Timestamp is a value we control (Date parsing), safe numeric result
             const time = new Date(event.Timestamp).toLocaleTimeString();
@@ -881,12 +980,13 @@ class SyncPrimitivesApp {
         animate();
     }
 
-    showNotification(message, type) {
+    showNotification(message, type, duration = 3000) {
         const notification = document.createElement('div');
         notification.className = `notification notification-${type}`;
         notification.textContent = message;
 
-        document.body.appendChild(notification);
+        const root = document.getElementById('notification-root') || document.body;
+        root.appendChild(notification);
 
         setTimeout(() => {
             notification.classList.add('show');
@@ -895,7 +995,7 @@ class SyncPrimitivesApp {
         setTimeout(() => {
             notification.classList.remove('show');
             setTimeout(() => notification.remove(), 300);
-        }, 3000);
+        }, duration);
     }
 
     runStressTest() {
@@ -931,7 +1031,13 @@ class SyncPrimitivesApp {
     }
 
     clearAll() {
-        if (!confirm('Delete all primitives?')) return;
+        const now = Date.now();
+        if (this.clearAllConfirmUntil < now) {
+            this.clearAllConfirmUntil = now + 3000;
+            this.showNotification('Press "Clear All" again within 3 seconds to confirm.', 'warning', 3000);
+            return;
+        }
+        this.clearAllConfirmUntil = 0;
 
         Object.keys(this.primitives).forEach(id => {
             this.send('deletePrimitive', { id });
@@ -947,7 +1053,7 @@ function showInlineError(inputId, message) {
     if (!errEl) {
         errEl = document.createElement('span');
         errEl.id = inputId + '-error';
-        errEl.style.cssText = 'color:red;font-size:12px;display:block;';
+        errEl.className = 'field-error';
         input.parentNode.insertBefore(errEl, input.nextSibling);
     }
     errEl.textContent = message;
@@ -966,9 +1072,10 @@ app.createPrimitive = function() {
     const name = document.getElementById('primitive-name').value.trim();
 
     if (!name) {
-        alert('Please enter a name');
+        showInlineError('primitive-name', 'Name is required');
         return;
     }
+    clearInlineError('primitive-name');
 
     const id = `${type}-${Date.now()}`;
 
