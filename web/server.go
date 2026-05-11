@@ -55,6 +55,7 @@ type Config struct {
 type connState struct {
 	// Sliding-window rate limit: track message timestamps.
 	msgTimes []time.Time
+	opTimes  []time.Time
 	mu       sync.Mutex
 }
 
@@ -138,10 +139,14 @@ type Server struct {
 	// droppedBroadcasts counts how many broadcast sends were dropped due to
 	// a full channel. Increment and log when the broadcast channel is full.
 	droppedBroadcasts atomic.Int64
+	// rate-limit counters for observability.
+	msgRateLimitHits atomic.Int64
+	opRateLimitHits  atomic.Int64
 
 	// Connection cap
 	maxConns    int
 	activeConns atomic.Int64
+	draining    atomic.Bool
 
 	// httpServer is stored so Shutdown can drain open connections.
 	httpServer *http.Server
@@ -269,6 +274,10 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if s.draining.Load() {
+		http.Error(w, "Server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Check connection cap before upgrading.
 	if s.activeConns.Load() >= int64(s.maxConns) {
@@ -309,7 +318,13 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		// S3: per-connection rate limiting (max 200 msg/s sliding window)
 		if !s.checkRateLimit(conn) {
+			s.msgRateLimitHits.Add(1)
 			s.sendError(conn, "rate limit exceeded: max 200 messages/second")
+			continue
+		}
+		if msg.Type == "primitiveOp" && !s.checkOpRateLimit(conn) {
+			s.opRateLimitHits.Add(1)
+			s.sendError(conn, "operation rate limit exceeded: max 50 ops/second per connection")
 			continue
 		}
 
@@ -344,6 +359,33 @@ func (s *Server) checkRateLimit(conn *websocket.Conn) bool {
 	cs.msgTimes = append(filtered, now)
 
 	return len(cs.msgTimes) <= maxMsgsPerSec
+}
+
+// checkOpRateLimit returns true when the connection stays under the per-second
+// primitive operation budget.
+func (s *Server) checkOpRateLimit(conn *websocket.Conn) bool {
+	const maxOpsPerSec = 50
+	now := time.Now()
+	cutoff := now.Add(-time.Second)
+
+	s.connStatesMu.Lock()
+	cs, ok := s.connStates[conn]
+	s.connStatesMu.Unlock()
+	if !ok {
+		return true
+	}
+
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	filtered := cs.opTimes[:0]
+	for _, t := range cs.opTimes {
+		if t.After(cutoff) {
+			filtered = append(filtered, t)
+		}
+	}
+	cs.opTimes = append(filtered, now)
+	return len(cs.opTimes) <= maxOpsPerSec
 }
 
 // pingLoop sends periodic pings and resets the read deadline on pong.
@@ -439,6 +481,12 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 	fmt.Fprintf(w, "# HELP syncprim_dropped_broadcasts_total Dropped broadcast messages\n")
 	fmt.Fprintf(w, "# TYPE syncprim_dropped_broadcasts_total counter\n")
 	fmt.Fprintf(w, "syncprim_dropped_broadcasts_total %d\n", s.droppedBroadcasts.Load())
+	fmt.Fprintf(w, "# HELP syncprim_rate_limit_hits_total Global message rate-limit rejections\n")
+	fmt.Fprintf(w, "# TYPE syncprim_rate_limit_hits_total counter\n")
+	fmt.Fprintf(w, "syncprim_rate_limit_hits_total %d\n", s.msgRateLimitHits.Load())
+	fmt.Fprintf(w, "# HELP syncprim_op_rate_limit_hits_total Primitive-op rate-limit rejections\n")
+	fmt.Fprintf(w, "# TYPE syncprim_op_rate_limit_hits_total counter\n")
+	fmt.Fprintf(w, "syncprim_op_rate_limit_hits_total %d\n", s.opRateLimitHits.Load())
 
 	// Per-primitive wait duration histograms.
 	allMetrics := s.metricsCollector.GetAllMetrics()
@@ -476,6 +524,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"status":             "ok",
 		"uptime_seconds":     m.Uptime.Seconds(),
 		"dropped_broadcasts": s.droppedBroadcasts.Load(),
+		"rate_limit_hits":    s.msgRateLimitHits.Load(),
+		"op_rate_limit_hits": s.opRateLimitHits.Load(),
 	})
 }
 
@@ -1835,6 +1885,29 @@ func (s *Server) Start(addr string) error {
 // Shutdown gracefully stops the server and all background goroutines.
 // The provided context controls how long to wait for active connections to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.draining.Store(true)
+
+	// Notify all active WS clients with a graceful close frame.
+	closeMsg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
+	s.clientsMu.RLock()
+	clients := make([]*websocket.Conn, 0, len(s.clients))
+	for conn := range s.clients {
+		clients = append(clients, conn)
+	}
+	s.clientsMu.RUnlock()
+	for _, conn := range clients {
+		s.writeMuMu.Lock()
+		mu, ok := s.writeMu[conn]
+		s.writeMuMu.Unlock()
+		if !ok {
+			continue
+		}
+		mu.Lock()
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.WriteMessage(websocket.CloseMessage, closeMsg)
+		mu.Unlock()
+	}
+
 	// Persist current state before cancelling contexts so all primitives
 	// are still reachable when saveSnapshot iterates connPrimsMap (Fix 8).
 	s.saveSnapshot()
