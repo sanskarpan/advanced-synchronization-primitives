@@ -5,7 +5,10 @@
 **Estimate:** S (1 day)
 **Epic:** Security and Stability Hardening
 **Labels:** p0, sprint-1, primitives, diagnostics
-**Status:** TODO
+**Status:** SHIPPED
+
+**Tracking Note:** Implemented on `origin/main`. This ticket is retained as historical planning context; the design notes and checklists below may not match the final shipped implementation verbatim.
+
 
 ## Problem Statement
 
