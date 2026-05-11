@@ -282,6 +282,7 @@ button:active {
 }
 
 .type-rwlock { background: #e3f2fd; color: #1976d2; }
+.type-fairrwlock { background: #e8eaf6; color: #283593; }
 .type-semaphore { background: #f3e5f5; color: #7b1fa2; }
 .type-mutex { background: #e8f5e9; color: #388e3c; }
 .type-condvar { background: #fff3e0; color: #f57c00; }
