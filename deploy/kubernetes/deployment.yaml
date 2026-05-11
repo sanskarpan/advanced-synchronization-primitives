@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: syncprimitives
+  labels:
+    app: syncprimitives
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: syncprimitives
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: syncprimitives
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8085"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: syncprimitives
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: syncprimitives
+          image: ghcr.io/sanskarpan/advanced-synchronization-primitives:latest
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              exec /app/syncprimitives-server
+              -addr "${SYNCPRIM_ADDR:-:8085}"
+              -allowed-origins "${SYNCPRIM_ALLOWED_ORIGINS}"
+              -api-key "${SYNCPRIM_API_KEY}"
+          ports:
+            - name: http
+              containerPort: 8085
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: syncprimitives-config
+          env:
+            - name: SYNCPRIM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: syncprimitives-secret
+                  key: api-key
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30

@@ -1,0 +1,13 @@
+# Optional PVC for snapshot persistence (single-writer by default).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: syncprimitives-snapshot
+  labels:
+    app: syncprimitives
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
