@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sanskar/syncprimitives/internal/auth"
 	"github.com/sanskar/syncprimitives/internal/metrics"
 	"github.com/sanskar/syncprimitives/internal/primitives"
 	"github.com/sanskar/syncprimitives/internal/scheduler"
@@ -42,6 +43,9 @@ type Config struct {
 	// server logs and browser history.
 	APIKey string
 
+	// JWTSecret, when non-empty, requires Bearer JWT authentication using HS256.
+	JWTSecret string
+
 	// MaxConns is the maximum number of concurrent WebSocket connections.
 	// 0 means use the default of 1000.
 	MaxConns int
@@ -64,8 +68,14 @@ type connState struct {
 	// Sliding-window rate limit: track message timestamps.
 	msgTimes []time.Time
 	opTimes  []time.Time
+	user     string
+	role     string
 	mu       sync.Mutex
 }
+
+type contextKey string
+
+const contextKeyClaims contextKey = "jwtClaims"
 
 // deltaState tracks per-connection snapshots for delta broadcasts.
 type deltaState struct {
@@ -161,10 +171,13 @@ type Server struct {
 	// a full channel. Increment and log when the broadcast channel is full.
 	droppedBroadcasts atomic.Int64
 	// rate-limit counters for observability.
-	msgRateLimitHits    atomic.Int64
-	opRateLimitHits     atomic.Int64
-	fullRefreshRequests atomic.Int64
-	updateSequence      atomic.Uint64
+	msgRateLimitHits      atomic.Int64
+	opRateLimitHits       atomic.Int64
+	fullRefreshRequests   atomic.Int64
+	updateSequence        atomic.Uint64
+	authFailuresExpired   atomic.Int64
+	authFailuresInvalid   atomic.Int64
+	authFailuresMalformed atomic.Int64
 
 	// Connection cap
 	maxConns    int
@@ -289,17 +302,40 @@ func NewServerWithConfig(cfg Config) *Server {
 
 // HandleWebSocket handles WebSocket connections
 func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// A1: API key authentication — checked before upgrade so we can return 401.
-	// Only the Authorization: Bearer <key> header is accepted.  URL query
-	// parameters are intentionally NOT supported: they appear in server access
-	// logs and browser history, creating a credential-leakage risk.
-	if s.cfg.APIKey != "" {
-		auth := r.Header.Get("Authorization")
-		key := strings.TrimPrefix(auth, "Bearer ")
-		if key == "" || key == auth || key != s.cfg.APIKey {
+	// Authentication is checked before upgrade so we can return HTTP 401.
+	if s.cfg.JWTSecret != "" {
+		authHeader := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == "" || token == authHeader {
+			s.authFailuresMalformed.Add(1)
+			http.Error(w, "Unauthorized: JWT required", http.StatusUnauthorized)
+			return
+		}
+		claims, err := auth.ValidateJWT(token, s.cfg.JWTSecret)
+		if err != nil {
+			msg := "Unauthorized: " + err.Error()
+			switch {
+			case strings.Contains(err.Error(), "expired"):
+				s.authFailuresExpired.Add(1)
+			case strings.Contains(err.Error(), "signature"):
+				s.authFailuresInvalid.Add(1)
+			default:
+				s.authFailuresMalformed.Add(1)
+			}
+			slog.Warn("WebSocket JWT auth failed", "err", err, "remote_addr", r.RemoteAddr)
+			http.Error(w, msg, http.StatusUnauthorized)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), contextKeyClaims, claims))
+		slog.Info("WebSocket authenticated", "sub", claims.Sub, "role", claims.Role)
+	} else if s.cfg.APIKey != "" {
+		authHeader := r.Header.Get("Authorization")
+		key := strings.TrimPrefix(authHeader, "Bearer ")
+		if key == "" || key == authHeader || key != s.cfg.APIKey {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		slog.Warn("API key authentication is deprecated; use JWTSecret", "remote_addr", r.RemoteAddr)
 	}
 	if s.draining.Load() {
 		http.Error(w, "Server is shutting down", http.StatusServiceUnavailable)
@@ -324,6 +360,14 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(64 * 1024)
 
 	s.registerClient(conn)
+	if claims, ok := r.Context().Value(contextKeyClaims).(*auth.Claims); ok && claims != nil {
+		s.connStatesMu.Lock()
+		if state := s.connStates[conn]; state != nil {
+			state.user = claims.Sub
+			state.role = claims.Role
+		}
+		s.connStatesMu.Unlock()
+	}
 	defer s.unregisterClient(conn)
 
 	// R1: start ping/pong keepalive goroutine
@@ -514,6 +558,11 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 	fmt.Fprintf(w, "# HELP syncprim_op_rate_limit_hits_total Primitive-op rate-limit rejections\n")
 	fmt.Fprintf(w, "# TYPE syncprim_op_rate_limit_hits_total counter\n")
 	fmt.Fprintf(w, "syncprim_op_rate_limit_hits_total %d\n", s.opRateLimitHits.Load())
+	fmt.Fprintf(w, "# HELP syncprim_auth_failures_total Authentication failures by reason\n")
+	fmt.Fprintf(w, "# TYPE syncprim_auth_failures_total counter\n")
+	fmt.Fprintf(w, "syncprim_auth_failures_total{reason=%q} %d\n", "expired", s.authFailuresExpired.Load())
+	fmt.Fprintf(w, "syncprim_auth_failures_total{reason=%q} %d\n", "invalid_signature", s.authFailuresInvalid.Load())
+	fmt.Fprintf(w, "syncprim_auth_failures_total{reason=%q} %d\n", "malformed", s.authFailuresMalformed.Load())
 
 	// Per-primitive wait duration histograms.
 	allMetrics := s.metricsCollector.GetAllMetrics()
@@ -1442,7 +1491,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
 				s.metricsCollector.RecordAcquire(payload.ID, 1)
-					s.metricsCollector.RecordWait(payload.ID, time.Since(start), clampWaiterCount(fairrwlock.GetStats().WaitersQueued))
+				s.metricsCollector.RecordWait(payload.ID, time.Since(start), clampWaiterCount(fairrwlock.GetStats().WaitersQueued))
 				go func() {
 					select {
 					case <-baseOpCtx.Done():
