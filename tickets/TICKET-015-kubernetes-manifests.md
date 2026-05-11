@@ -5,7 +5,9 @@
 **Estimate:** M (3–4 days)
 **Epic:** Enterprise Features
 **Labels:** p2, sprint-11, kubernetes, infrastructure, deployment
-**Status:** TODO
+**Status:** SHIPPED
+
+**Tracking Note:** Implemented on `origin/main`. This ticket is retained as historical planning context; the design notes and checklists below may not match the final shipped implementation verbatim.
 
 ## Problem Statement
 
