@@ -47,6 +47,9 @@ type Config struct {
 	// JWTSecret, when non-empty, requires Bearer JWT authentication using HS256.
 	JWTSecret string
 
+	// DefaultNamespace is used when no namespace is supplied by the client.
+	DefaultNamespace string
+
 	// MaxConns is the maximum number of concurrent WebSocket connections.
 	// 0 means use the default of 1000.
 	MaxConns int
@@ -74,12 +77,15 @@ type Config struct {
 // connState holds per-connection rate-limiting state.
 type connState struct {
 	// Sliding-window rate limit: track message timestamps.
-	msgTimes []time.Time
-	opTimes  []time.Time
-	connID   string
-	user     string
-	role     string
-	mu       sync.Mutex
+	msgTimes  []time.Time
+	opTimes   []time.Time
+	connID    string
+	user      string
+	role      string
+	namespace string
+	opCtx     context.Context
+	opCancel  context.CancelFunc
+	mu        sync.Mutex
 }
 
 type contextKey string
@@ -165,6 +171,8 @@ type Server struct {
 	// Per-connection primitive maps (Fix 3).
 	connPrimsMap map[*websocket.Conn]*connPrims
 	connPrimsMu  sync.RWMutex
+	namespaces   map[string]*connPrims
+	namespacesMu sync.RWMutex
 
 	// WebSocket clients
 	clients   map[*websocket.Conn]bool
@@ -293,6 +301,7 @@ func NewServerWithConfig(cfg Config) *Server {
 		scheduler:        scheduler.NewScheduler(),
 		metricsCollector: metrics.NewMetricsCollectorWithBuckets(cfg.HistogramBuckets),
 		connPrimsMap:     make(map[*websocket.Conn]*connPrims),
+		namespaces:       make(map[string]*connPrims),
 		clients:          make(map[*websocket.Conn]bool),
 		writeMu:          make(map[*websocket.Conn]*sync.Mutex),
 		connStates:       make(map[*websocket.Conn]*connState),
@@ -329,6 +338,8 @@ func NewServerWithConfig(cfg Config) *Server {
 // HandleWebSocket handles WebSocket connections
 func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Authentication is checked before upgrade so we can return HTTP 401.
+	var claims *auth.Claims
+	var err error
 	if s.cfg.JWTSecret != "" {
 		authHeader := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(authHeader, "Bearer ")
@@ -337,7 +348,7 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Unauthorized: JWT required", http.StatusUnauthorized)
 			return
 		}
-		claims, err := auth.ValidateJWT(token, s.cfg.JWTSecret)
+		claims, err = auth.ValidateJWT(token, s.cfg.JWTSecret)
 		if err != nil {
 			msg := "Unauthorized: " + err.Error()
 			switch {
@@ -368,6 +379,11 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
+	namespace, err := s.extractNamespace(r, claims)
+	if err != nil {
+		http.Error(w, "Bad Request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Check connection cap before upgrading.
 	if s.activeConns.Load() >= int64(s.maxConns) {
@@ -386,8 +402,8 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// R2: limit max message size to 64 KiB
 	conn.SetReadLimit(64 * 1024)
 
-	s.registerClient(conn)
-	if claims, ok := r.Context().Value(contextKeyClaims).(*auth.Claims); ok && claims != nil {
+	s.registerClient(conn, namespace)
+	if claims != nil {
 		s.connStatesMu.Lock()
 		if state := s.connStates[conn]; state != nil {
 			state.user = claims.Sub
@@ -661,8 +677,8 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
-// registerClient registers a new WebSocket client and creates its per-connection primitive map.
-func (s *Server) registerClient(conn *websocket.Conn) {
+// registerClient registers a new WebSocket client and attaches it to a namespace-backed primitive map.
+func (s *Server) registerClient(conn *websocket.Conn, namespace string) {
 	s.clientsMu.Lock()
 	s.clients[conn] = true
 	s.clientsMu.Unlock()
@@ -672,8 +688,11 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.writeMuMu.Unlock()
 
 	connID := fmt.Sprintf("conn-%d", s.connCounter.Add(1))
+	cp := s.getOrCreateNamespacePrims(namespace)
+	connOpCtx, connOpCancel := context.WithCancel(s.shutdownCtx)
+
 	s.connStatesMu.Lock()
-	s.connStates[conn] = &connState{connID: connID, role: RoleAdmin}
+	s.connStates[conn] = &connState{connID: connID, role: RoleAdmin, namespace: namespace, opCtx: connOpCtx, opCancel: connOpCancel}
 	s.connStatesMu.Unlock()
 
 	s.deltaStatesMu.Lock()
@@ -683,10 +702,10 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	s.deltaStatesMu.Unlock()
 
 	s.connPrimsMu.Lock()
-	s.connPrimsMap[conn] = newConnPrims()
+	s.connPrimsMap[conn] = cp
 	s.connPrimsMu.Unlock()
 
-	slog.Info("Client connected", "addr", conn.RemoteAddr())
+	slog.Info("Client connected", "addr", conn.RemoteAddr(), "namespace", namespace)
 	s.logAudit(conn, audit.Entry{
 		Timestamp: time.Now().UTC(),
 		Event:     "conn_opened",
@@ -694,7 +713,7 @@ func (s *Server) registerClient(conn *websocket.Conn) {
 	})
 }
 
-// unregisterClient unregisters a WebSocket client and removes its per-connection primitive map.
+// unregisterClient unregisters a WebSocket client.
 func (s *Server) unregisterClient(conn *websocket.Conn) {
 	s.clientsMu.Lock()
 	delete(s.clients, conn)
@@ -705,6 +724,9 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 	s.writeMuMu.Unlock()
 
 	s.connStatesMu.Lock()
+	if state := s.connStates[conn]; state != nil && state.opCancel != nil {
+		state.opCancel()
+	}
 	delete(s.connStates, conn)
 	s.connStatesMu.Unlock()
 
@@ -713,14 +735,6 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 	s.deltaStatesMu.Unlock()
 
 	s.connPrimsMu.Lock()
-	if cp, ok := s.connPrimsMap[conn]; ok {
-		cp.primCtxsMu.Lock()
-		for id, entry := range cp.primCtxs {
-			entry.cancel()
-			delete(cp.primCtxs, id)
-		}
-		cp.primCtxsMu.Unlock()
-	}
 	delete(s.connPrimsMap, conn)
 	s.connPrimsMu.Unlock()
 
@@ -737,13 +751,14 @@ func (s *Server) unregisterClient(conn *websocket.Conn) {
 
 // sendInitialState sends the initial state to a client
 func (s *Server) sendInitialState(conn *websocket.Conn) {
-	prims := s.scheduler.GetPrimitives()
+	namespace := s.namespaceForConn(conn)
+	prims := filterPrimitivesForNamespace(s.scheduler.GetPrimitives(), namespace)
 	s.seedDeltaState(conn, prims)
 
 	state := map[string]interface{}{
 		"primitives": prims,
-		"goroutines": s.scheduler.GetGoroutines(),
-		"events":     s.scheduler.GetEvents(100),
+		"goroutines": filterGoroutinesForNamespace(s.scheduler.GetGoroutines(), namespace),
+		"events":     filterEventsForNamespace(s.scheduler.GetEvents(100), namespace),
 		"metrics":    s.scheduler.GetMetrics(),
 		"sequence":   s.updateSequence.Load(),
 	}
@@ -827,6 +842,168 @@ func normalizeRole(role string, authenticated bool) string {
 	}
 }
 
+func (s *Server) defaultNamespace() string {
+	if strings.TrimSpace(s.cfg.DefaultNamespace) != "" {
+		return strings.TrimSpace(s.cfg.DefaultNamespace)
+	}
+	return "default"
+}
+
+func validateNamespaceName(ns string) string {
+	ns = strings.TrimSpace(ns)
+	if ns == "" {
+		return ""
+	}
+	if len(ns) > maxIDLen {
+		return fmt.Sprintf("namespace must not exceed %d characters", maxIDLen)
+	}
+	if strings.Contains(ns, "/") {
+		return "namespace must not contain '/'"
+	}
+	return ""
+}
+
+func (s *Server) extractNamespace(r *http.Request, claims *auth.Claims) (string, error) {
+	ns := ""
+	if claims != nil && strings.TrimSpace(claims.Namespace) != "" {
+		ns = strings.TrimSpace(claims.Namespace)
+	} else if s.cfg.JWTSecret == "" {
+		ns = strings.TrimSpace(r.URL.Query().Get("ns"))
+	}
+	if ns == "" {
+		ns = s.defaultNamespace()
+	}
+	if errMsg := validateNamespaceName(ns); errMsg != "" {
+		return "", errors.New(errMsg)
+	}
+	return ns, nil
+}
+
+func (s *Server) getOrCreateNamespacePrims(namespace string) *connPrims {
+	s.namespacesMu.Lock()
+	defer s.namespacesMu.Unlock()
+	cp := s.namespaces[namespace]
+	if cp == nil {
+		cp = newConnPrims()
+		s.namespaces[namespace] = cp
+	}
+	return cp
+}
+
+func (s *Server) namespaceForConn(conn *websocket.Conn) string {
+	s.connStatesMu.Lock()
+	defer s.connStatesMu.Unlock()
+	if cs := s.connStates[conn]; cs != nil && cs.namespace != "" {
+		return cs.namespace
+	}
+	return s.defaultNamespace()
+}
+
+func qualifiedPrimID(namespace, id string) string {
+	return namespace + "/" + id
+}
+
+func splitQualifiedPrimID(id string) (string, string) {
+	parts := strings.SplitN(id, "/", 2)
+	if len(parts) != 2 {
+		return "", id
+	}
+	return parts[0], parts[1]
+}
+
+func stripNamespaceFromPrimitiveInfo(info *scheduler.PrimitiveInfo) *scheduler.PrimitiveInfo {
+	if info == nil {
+		return nil
+	}
+	copyInfo := *info
+	_, rawID := splitQualifiedPrimID(copyInfo.ID)
+	copyInfo.ID = rawID
+	return &copyInfo
+}
+
+func filterPrimitivesForNamespace(prims map[string]*scheduler.PrimitiveInfo, namespace string) map[string]*scheduler.PrimitiveInfo {
+	filtered := make(map[string]*scheduler.PrimitiveInfo)
+	for id, prim := range prims {
+		ns, rawID := splitQualifiedPrimID(id)
+		if ns != namespace {
+			continue
+		}
+		copyInfo := *prim
+		copyInfo.ID = rawID
+		filtered[rawID] = &copyInfo
+	}
+	return filtered
+}
+
+func filterEventsForNamespace(events []scheduler.Event, namespace string) []scheduler.Event {
+	filtered := make([]scheduler.Event, 0, len(events))
+	for _, event := range events {
+		if event.PrimitiveID == "" {
+			continue
+		}
+		ns, rawID := splitQualifiedPrimID(event.PrimitiveID)
+		if ns != namespace {
+			continue
+		}
+		copyEvent := event
+		copyEvent.PrimitiveID = rawID
+		filtered = append(filtered, copyEvent)
+	}
+	return filtered
+}
+
+func filterGoroutinesForNamespace(goroutines map[uint64]*scheduler.GoroutineInfo, namespace string) map[uint64]*scheduler.GoroutineInfo {
+	filtered := make(map[uint64]*scheduler.GoroutineInfo)
+	for id, g := range goroutines {
+		if g.BlockedOn == "" {
+			continue
+		}
+		ns, rawID := splitQualifiedPrimID(g.BlockedOn)
+		if ns != namespace {
+			continue
+		}
+		copyInfo := *g
+		copyInfo.BlockedOn = rawID
+		filtered[id] = &copyInfo
+	}
+	return filtered
+}
+
+func filterMetricSnapshotsForNamespace(all map[string]*metrics.PrimitiveMetricsSnapshot, namespace string) map[string]*metrics.PrimitiveMetricsSnapshot {
+	filtered := make(map[string]*metrics.PrimitiveMetricsSnapshot)
+	for id, snapshot := range all {
+		ns, rawID := splitQualifiedPrimID(id)
+		if ns != namespace {
+			continue
+		}
+		filtered[rawID] = snapshot
+	}
+	return filtered
+}
+
+func contextWithEitherCancel(a, b context.Context) (context.Context, context.CancelFunc) {
+	if a == nil && b == nil {
+		return context.WithCancel(context.Background())
+	}
+	if a == nil {
+		return context.WithCancel(b)
+	}
+	if b == nil {
+		return context.WithCancel(a)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-a.Done():
+			cancel()
+		case <-b.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
 func (s *Server) roleForConn(conn *websocket.Conn) string {
 	s.connStatesMu.Lock()
 	cs, ok := s.connStates[conn]
@@ -889,13 +1066,14 @@ func (s *Server) handleRequestFullRefresh(conn *websocket.Conn) {
 }
 
 func (s *Server) sendState(conn *websocket.Conn) {
-	prims := s.scheduler.GetPrimitives()
+	namespace := s.namespaceForConn(conn)
+	prims := filterPrimitivesForNamespace(s.scheduler.GetPrimitives(), namespace)
 	s.seedDeltaState(conn, prims)
 
 	state := map[string]interface{}{
 		"primitives": prims,
-		"goroutines": s.scheduler.GetGoroutines(),
-		"events":     s.scheduler.GetEvents(100),
+		"goroutines": filterGoroutinesForNamespace(s.scheduler.GetGoroutines(), namespace),
+		"events":     filterEventsForNamespace(s.scheduler.GetEvents(100), namespace),
 		"metrics":    s.scheduler.GetMetrics(),
 		"sequence":   s.updateSequence.Load(),
 	}
@@ -956,8 +1134,9 @@ func (s *Server) handleCreateRWLock(conn *websocket.Conn, msg Message) {
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
 
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeRWLock, payload.Name, rwlock.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeRWLock), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeRWLock, payload.Name, rwlock.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeRWLock), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1009,8 +1188,9 @@ func (s *Server) handleCreateFairRWLock(conn *websocket.Conn, msg Message) {
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
 
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeFairRWLock, payload.Name, rwlock.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeFairRWLock), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeFairRWLock, payload.Name, rwlock.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeFairRWLock), payload.Name)
 
 	s.sendSuccess(conn, "FairRWLock created")
 }
@@ -1062,8 +1242,9 @@ func (s *Server) handleCreateSemaphore(conn *websocket.Conn, msg Message) {
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
 
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeSemaphore, payload.Name, semaphore.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeSemaphore), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeSemaphore, payload.Name, semaphore.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeSemaphore), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1115,8 +1296,9 @@ func (s *Server) handleCreateMutex(conn *websocket.Conn, msg Message) {
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
 
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeMutex, payload.Name, mutex.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeMutex), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeMutex, payload.Name, mutex.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeMutex), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1168,8 +1350,9 @@ func (s *Server) handleCreateCondVar(conn *websocket.Conn, msg Message) {
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
 
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeCondVar, payload.Name, condvar.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeCondVar), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeCondVar, payload.Name, condvar.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeCondVar), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1227,8 +1410,9 @@ func (s *Server) handleCreateBarrier(conn *websocket.Conn, msg Message) {
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
 
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeBarrier, payload.Name, barrier.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeBarrier), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeBarrier, payload.Name, barrier.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeBarrier), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1275,8 +1459,9 @@ func (s *Server) handleCreateWaitGroup(conn *websocket.Conn, msg Message) {
 	cp.primCtxs[payload.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeWaitGroup, payload.Name, wg.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeWaitGroup), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeWaitGroup, payload.Name, wg.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeWaitGroup), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1322,8 +1507,9 @@ func (s *Server) handleCreateOnce(conn *websocket.Conn, msg Message) {
 	cp.primCtxs[payload.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeOnce, payload.Name, o.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeOnce), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeOnce, payload.Name, o.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeOnce), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1369,8 +1555,9 @@ func (s *Server) handleCreateSingleflight(conn *websocket.Conn, msg Message) {
 	cp.primCtxs[payload.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 	cp.primCtxsMu.Unlock()
 	cp.mu.Unlock()
-	s.scheduler.RegisterPrimitive(payload.ID, scheduler.TypeSingleflight, payload.Name, g.GetStats())
-	s.metricsCollector.RegisterPrimitive(payload.ID, string(scheduler.TypeSingleflight), payload.Name)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.RegisterPrimitive(internalID, scheduler.TypeSingleflight, payload.Name, g.GetStats())
+	s.metricsCollector.RegisterPrimitive(internalID, string(scheduler.TypeSingleflight), payload.Name)
 	s.logAudit(conn, audit.Entry{
 		Event:         "primitive_created",
 		PrimitiveID:   payload.ID,
@@ -1422,8 +1609,9 @@ func (s *Server) handleDeletePrimitive(conn *websocket.Conn, msg Message) {
 	}
 	cp.primCtxsMu.Unlock()
 
-	s.scheduler.UnregisterPrimitive(payload.ID)
-	s.metricsCollector.UnregisterPrimitive(payload.ID)
+	internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+	s.scheduler.UnregisterPrimitive(internalID)
+	s.metricsCollector.UnregisterPrimitive(internalID)
 	s.logAudit(conn, audit.Entry{
 		Event:       "primitive_deleted",
 		PrimitiveID: payload.ID,
@@ -1436,7 +1624,7 @@ func (s *Server) handleDeletePrimitive(conn *websocket.Conn, msg Message) {
 // handleGetMetrics sends metrics to the client
 func (s *Server) handleGetMetrics(conn *websocket.Conn, msg Message) {
 	globalMetrics := s.metricsCollector.GetGlobalMetrics()
-	primitiveMetrics := s.metricsCollector.GetAllMetrics()
+	primitiveMetrics := filterMetricSnapshotsForNamespace(s.metricsCollector.GetAllMetrics(), s.namespaceForConn(conn))
 
 	response := map[string]interface{}{
 		"global":     globalMetrics,
@@ -1573,14 +1761,19 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 		// When the primitive is deleted, its cancel func is called which
 		// cancels this context, unblocking any goroutine waiting on it.
 		cp.primCtxsMu.Lock()
-		var baseOpCtx context.Context
+		primitiveCtx := s.shutdownCtx
 		if entry, ok := cp.primCtxs[payload.ID]; ok {
-			baseOpCtx = entry.ctx
-		} else {
-			baseOpCtx = s.shutdownCtx
+			primitiveCtx = entry.ctx
 		}
 		cp.primCtxsMu.Unlock()
-		opCtxForBlocking, opCancel := context.WithTimeout(baseOpCtx, operationTimeout)
+		connCtx := s.shutdownCtx
+		s.connStatesMu.Lock()
+		if state := s.connStates[conn]; state != nil && state.opCtx != nil {
+			connCtx = state.opCtx
+		}
+		s.connStatesMu.Unlock()
+		holdCtx, holdCancel := contextWithEitherCancel(primitiveCtx, connCtx)
+		opCtxForBlocking, opCancel := context.WithTimeout(holdCtx, operationTimeout)
 		defer opCancel()
 		start := time.Now()
 
@@ -1598,7 +1791,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				s.sendError(conn, "operation timed out after 1 hour")
 				return
 			}
-			if baseOpCtx.Err() != nil {
+			if primitiveCtx.Err() != nil {
 				s.logAudit(conn, audit.Entry{
 					Event:       "primitive_op",
 					PrimitiveID: payload.ID,
@@ -1622,11 +1815,12 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			})
 			s.sendError(conn, "operation cancelled")
 		}
-
+		internalID := qualifiedPrimID(s.namespaceForConn(conn), payload.ID)
+		keepHoldCtx := false
 		switch payload.Op {
 		case "rlock":
 			if rwlock != nil {
-				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				s.scheduler.BlockGoroutine(goroutineID, internalID)
 				blockStart := time.Now()
 				if err := rwlock.RLockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1634,17 +1828,19 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				s.metricsCollector.RecordAcquire(payload.ID, rwlock.GetStats().CurrentReaders)
+				s.metricsCollector.RecordAcquire(internalID, rwlock.GetStats().CurrentReaders)
+				keepHoldCtx = true
 				go func() {
+					defer holdCancel()
 					select {
-					case <-baseOpCtx.Done():
+					case <-holdCtx.Done():
 					case <-time.After(holdDuration):
 					}
 					rwlock.RUnlock()
-					s.metricsCollector.RecordRelease(payload.ID, rwlock.GetStats().CurrentReaders)
+					s.metricsCollector.RecordRelease(internalID, rwlock.GetStats().CurrentReaders)
 				}()
 			} else if fairrwlock != nil {
-				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				s.scheduler.BlockGoroutine(goroutineID, internalID)
 				blockStart := time.Now()
 				if err := fairrwlock.RLockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1652,14 +1848,16 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				s.metricsCollector.RecordAcquire(payload.ID, fairrwlock.GetStats().CurrentReaders)
+				s.metricsCollector.RecordAcquire(internalID, fairrwlock.GetStats().CurrentReaders)
+				keepHoldCtx = true
 				go func() {
+					defer holdCancel()
 					select {
-					case <-baseOpCtx.Done():
+					case <-holdCtx.Done():
 					case <-time.After(holdDuration):
 					}
 					fairrwlock.RUnlock()
-					s.metricsCollector.RecordRelease(payload.ID, fairrwlock.GetStats().CurrentReaders)
+					s.metricsCollector.RecordRelease(internalID, fairrwlock.GetStats().CurrentReaders)
 				}()
 			} else {
 				s.sendError(conn, "RWLock not found: "+payload.ID)
@@ -1668,7 +1866,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 
 		case "lock":
 			if fairrwlock != nil {
-				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				s.scheduler.BlockGoroutine(goroutineID, internalID)
 				blockStart := time.Now()
 				if err := fairrwlock.LockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1676,18 +1874,20 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				s.metricsCollector.RecordAcquire(payload.ID, 1)
-				s.metricsCollector.RecordWait(payload.ID, time.Since(start), clampWaiterCount(fairrwlock.GetStats().WaitersQueued))
+				s.metricsCollector.RecordAcquire(internalID, 1)
+				s.metricsCollector.RecordWait(internalID, time.Since(start), clampWaiterCount(fairrwlock.GetStats().WaitersQueued))
+				keepHoldCtx = true
 				go func() {
+					defer holdCancel()
 					select {
-					case <-baseOpCtx.Done():
+					case <-holdCtx.Done():
 					case <-time.After(holdDuration):
 					}
 					fairrwlock.Unlock()
-					s.metricsCollector.RecordRelease(payload.ID, 0)
+					s.metricsCollector.RecordRelease(internalID, 0)
 				}()
 			} else if rwlock != nil {
-				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				s.scheduler.BlockGoroutine(goroutineID, internalID)
 				blockStart := time.Now()
 				if err := rwlock.LockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1695,18 +1895,20 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				s.metricsCollector.RecordAcquire(payload.ID, 1)
-				s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(rwlock.GetStats().WritersWaiting))
+				s.metricsCollector.RecordAcquire(internalID, 1)
+				s.metricsCollector.RecordWait(internalID, time.Since(start), int32(rwlock.GetStats().WritersWaiting))
+				keepHoldCtx = true
 				go func() {
+					defer holdCancel()
 					select {
-					case <-baseOpCtx.Done():
+					case <-holdCtx.Done():
 					case <-time.After(holdDuration):
 					}
 					rwlock.Unlock()
-					s.metricsCollector.RecordRelease(payload.ID, 0)
+					s.metricsCollector.RecordRelease(internalID, 0)
 				}()
 			} else if mutex != nil {
-				s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+				s.scheduler.BlockGoroutine(goroutineID, internalID)
 				blockStart := time.Now()
 				if err := mutex.LockContext(opCtxForBlocking); err != nil {
 					s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1714,15 +1916,17 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 					return
 				}
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-				s.metricsCollector.RecordAcquire(payload.ID, 1)
-				s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(mutex.GetStats().WaitersQueued))
+				s.metricsCollector.RecordAcquire(internalID, 1)
+				s.metricsCollector.RecordWait(internalID, time.Since(start), int32(mutex.GetStats().WaitersQueued))
+				keepHoldCtx = true
 				go func() {
+					defer holdCancel()
 					select {
-					case <-baseOpCtx.Done():
+					case <-holdCtx.Done():
 					case <-time.After(holdDuration):
 					}
 					mutex.Unlock()
-					s.metricsCollector.RecordRelease(payload.ID, 0)
+					s.metricsCollector.RecordRelease(internalID, 0)
 				}()
 			} else {
 				s.sendError(conn, "Lock primitive not found: "+payload.ID)
@@ -1739,14 +1943,14 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				return
 			}
 			mutex.Unlock()
-			s.metricsCollector.RecordRelease(payload.ID, 0)
+			s.metricsCollector.RecordRelease(internalID, 0)
 
 		case "acquire":
 			if semaphore == nil {
 				s.sendError(conn, "Semaphore not found: "+payload.ID)
 				return
 			}
-			s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+			s.scheduler.BlockGoroutine(goroutineID, internalID)
 			blockStart := time.Now()
 			if err := semaphore.AcquireContext(opCtxForBlocking); err != nil {
 				s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1754,8 +1958,8 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				return
 			}
 			s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
-			s.metricsCollector.RecordAcquire(payload.ID, semaphore.GetStats().CurrentCount)
-			s.metricsCollector.RecordWait(payload.ID, time.Since(start), int32(semaphore.GetStats().WaitersQueued))
+			s.metricsCollector.RecordAcquire(internalID, semaphore.GetStats().CurrentCount)
+			s.metricsCollector.RecordWait(internalID, time.Since(start), int32(semaphore.GetStats().WaitersQueued))
 
 		case "release":
 			if semaphore == nil {
@@ -1766,7 +1970,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				s.sendError(conn, "Semaphore release error: "+err.Error())
 				return
 			}
-			s.metricsCollector.RecordRelease(payload.ID, semaphore.GetStats().CurrentCount)
+			s.metricsCollector.RecordRelease(internalID, semaphore.GetStats().CurrentCount)
 
 		case "signal":
 			if condvar == nil {
@@ -1789,7 +1993,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			}
 			// Derive a 500ms timeout from opCtxForBlocking: the op times out if
 			// the barrier never trips, and is cancelled immediately on shutdown/delete.
-			s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+			s.scheduler.BlockGoroutine(goroutineID, internalID)
 			blockStart := time.Now()
 			timeoutCtx, timeoutCancel := context.WithTimeout(opCtxForBlocking, 500*time.Millisecond)
 			_, _ = barrier.WaitContext(timeoutCtx)
@@ -1826,7 +2030,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				s.sendError(conn, "WaitGroup not found: "+payload.ID)
 				return
 			}
-			s.scheduler.BlockGoroutine(goroutineID, payload.ID)
+			s.scheduler.BlockGoroutine(goroutineID, internalID)
 			blockStart := time.Now()
 			_ = waitgroup.WaitContext(opCtxForBlocking)
 			s.scheduler.UnblockGoroutine(goroutineID, time.Since(blockStart))
@@ -1852,8 +2056,12 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 			sflight.Forget(payload.ID)
 
 		default:
+			holdCancel()
 			s.sendError(conn, "Unknown operation: "+payload.Op)
 			return
+		}
+		if !keepHoldCtx {
+			holdCancel()
 		}
 
 		if holdWarning != "" {
@@ -1863,7 +2071,7 @@ func (s *Server) handlePrimitiveOp(conn *websocket.Conn, msg Message) {
 				Op:          payload.Op,
 				HoldMs:      payload.HoldMs,
 				Result:      "success",
-					DurationNs:  int64(time.Since(start) / time.Nanosecond),
+				DurationNs:  int64(time.Since(start) / time.Nanosecond),
 			})
 			s.sendToClient(conn, Message{
 				Type: "success",
@@ -1991,6 +2199,8 @@ type deltaUpdatePayload struct {
 func (s *Server) buildDeltaUpdatePayload(conn *websocket.Conn, update *scheduler.SchedulerUpdate, sequence uint64) deltaUpdatePayload {
 	changed := make(map[string]*scheduler.PrimitiveInfo)
 	deleted := make([]string, 0)
+	namespace := s.namespaceForConn(conn)
+	filteredPrims := filterPrimitivesForNamespace(update.Primitives, namespace)
 
 	s.deltaStatesMu.Lock()
 	ds, ok := s.deltaStates[conn]
@@ -1999,7 +2209,7 @@ func (s *Server) buildDeltaUpdatePayload(conn *websocket.Conn, update *scheduler
 		s.deltaStates[conn] = ds
 	}
 
-	for id, prim := range update.Primitives {
+	for id, prim := range filteredPrims {
 		snapshot := primitiveSnapshotKey(prim)
 		if prev, exists := ds.lastPrimJSON[id]; !exists || prev != snapshot {
 			changed[id] = prim
@@ -2008,7 +2218,7 @@ func (s *Server) buildDeltaUpdatePayload(conn *websocket.Conn, update *scheduler
 	}
 
 	for id := range ds.lastPrimJSON {
-		if _, exists := update.Primitives[id]; exists {
+		if _, exists := filteredPrims[id]; exists {
 			continue
 		}
 		deleted = append(deleted, id)
@@ -2019,8 +2229,8 @@ func (s *Server) buildDeltaUpdatePayload(conn *websocket.Conn, update *scheduler
 	return deltaUpdatePayload{
 		Primitives: changed,
 		Deleted:    deleted,
-		Goroutines: update.Goroutines,
-		Events:     update.Events,
+		Goroutines: filterGoroutinesForNamespace(update.Goroutines, namespace),
+		Events:     filterEventsForNamespace(update.Events, namespace),
 		Metrics:    update.Metrics,
 		Sequence:   sequence,
 	}
@@ -2088,39 +2298,39 @@ func (s *Server) updatePrimitiveStats() {
 		case <-ticker.C:
 		}
 
-		s.connPrimsMu.RLock()
-		for _, cp := range s.connPrimsMap {
+		s.namespacesMu.RLock()
+		for namespace, cp := range s.namespaces {
 			cp.mu.RLock()
 			for id, rw := range cp.rwlocks {
-				s.scheduler.UpdatePrimitiveStats(id, rw.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), rw.GetStats())
 			}
 			for id, rw := range cp.fairrwlocks {
-				s.scheduler.UpdatePrimitiveStats(id, rw.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), rw.GetStats())
 			}
 			for id, sem := range cp.semaphores {
-				s.scheduler.UpdatePrimitiveStats(id, sem.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), sem.GetStats())
 			}
 			for id, m := range cp.mutexes {
-				s.scheduler.UpdatePrimitiveStats(id, m.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), m.GetStats())
 			}
 			for id, cv := range cp.condvars {
-				s.scheduler.UpdatePrimitiveStats(id, cv.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), cv.GetStats())
 			}
 			for id, b := range cp.barriers {
-				s.scheduler.UpdatePrimitiveStats(id, b.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), b.GetStats())
 			}
 			for id, wg := range cp.waitgroups {
-				s.scheduler.UpdatePrimitiveStats(id, wg.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), wg.GetStats())
 			}
 			for id, o := range cp.onces {
-				s.scheduler.UpdatePrimitiveStats(id, o.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), o.GetStats())
 			}
 			for id, g := range cp.singleflights {
-				s.scheduler.UpdatePrimitiveStats(id, g.GetStats())
+				s.scheduler.UpdatePrimitiveStats(qualifiedPrimID(namespace, id), g.GetStats())
 			}
 			cp.mu.RUnlock()
 		}
-		s.connPrimsMu.RUnlock()
+		s.namespacesMu.RUnlock()
 	}
 }
 
@@ -2164,6 +2374,7 @@ const snapshotVersion = 1
 // snapshotFile is the top-level structure written to disk.
 type snapshotFile struct {
 	Version    int                 `json:"version"`
+	Namespace  string              `json:"namespace,omitempty"`
 	Primitives []primitiveSnapshot `json:"primitives"`
 }
 
@@ -2185,6 +2396,8 @@ func (s *Server) saveSnapshot() {
 		return
 	}
 
+	namespace := s.defaultNamespace()
+
 	// Fetch names from the scheduler (single source of truth for names).
 	schedPrims := s.scheduler.GetPrimitives()
 	nameFor := func(id string) string {
@@ -2196,80 +2409,44 @@ func (s *Server) saveSnapshot() {
 
 	var snap snapshotFile
 	snap.Version = snapshotVersion
+	snap.Namespace = namespace
 
-	s.connPrimsMu.RLock()
-	for _, cp := range s.connPrimsMap {
+	s.namespacesMu.RLock()
+	cp := s.namespaces[namespace]
+	s.namespacesMu.RUnlock()
+	if cp != nil {
 		cp.mu.RLock()
 		for id := range cp.rwlocks {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeRWLock),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeRWLock), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		for id := range cp.fairrwlocks {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeFairRWLock),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeFairRWLock), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		for id, sem := range cp.semaphores {
 			st := sem.GetStats()
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:       id,
-				Type:     string(scheduler.TypeSemaphore),
-				Name:     nameFor(id),
-				Capacity: st.Capacity,
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeSemaphore), Name: nameFor(qualifiedPrimID(namespace, id)), Capacity: st.Capacity})
 		}
 		for id := range cp.mutexes {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeMutex),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeMutex), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		for id := range cp.condvars {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeCondVar),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeCondVar), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		for id, b := range cp.barriers {
 			st := b.GetStats()
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:      id,
-				Type:    string(scheduler.TypeBarrier),
-				Name:    nameFor(id),
-				Parties: st.Parties,
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeBarrier), Name: nameFor(qualifiedPrimID(namespace, id)), Parties: st.Parties})
 		}
 		for id := range cp.waitgroups {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeWaitGroup),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeWaitGroup), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		for id := range cp.onces {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeOnce),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeOnce), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		for id := range cp.singleflights {
-			snap.Primitives = append(snap.Primitives, primitiveSnapshot{
-				ID:   id,
-				Type: string(scheduler.TypeSingleflight),
-				Name: nameFor(id),
-			})
+			snap.Primitives = append(snap.Primitives, primitiveSnapshot{ID: id, Type: string(scheduler.TypeSingleflight), Name: nameFor(qualifiedPrimID(namespace, id))})
 		}
 		cp.mu.RUnlock()
 	}
-	s.connPrimsMu.RUnlock()
 
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -2321,7 +2498,11 @@ func (s *Server) loadSnapshot() {
 			)
 			return
 		}
-		s.restoreSnapshotPrimitives(snap.Primitives)
+		namespace := snap.Namespace
+		if namespace == "" {
+			namespace = s.defaultNamespace()
+		}
+		s.restoreSnapshotPrimitives(namespace, snap.Primitives)
 		return
 	}
 
@@ -2350,21 +2531,18 @@ func (s *Server) loadSnapshot() {
 			len(legacyPrims),
 		)
 	}
-	s.restoreSnapshotPrimitives(legacyPrims)
+	s.restoreSnapshotPrimitives(s.defaultNamespace(), legacyPrims)
 }
 
-func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
-	// Use a sentinel connPrims entry keyed under nil to hold restored primitives.
-	cp := newConnPrims()
-	s.connPrimsMu.Lock()
-	s.connPrimsMap[nil] = cp
-	s.connPrimsMu.Unlock()
+func (s *Server) restoreSnapshotPrimitives(namespace string, prims []primitiveSnapshot) {
+	cp := s.getOrCreateNamespacePrims(namespace)
 
 	restored := 0
 	for _, p := range prims {
 		if p.ID == "" {
 			continue
 		}
+		internalID := qualifiedPrimID(namespace, p.ID)
 		switch p.Type {
 		case string(scheduler.TypeRWLock):
 			rw := primitives.NewRWLock()
@@ -2375,8 +2553,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeRWLock, p.Name, rw.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeRWLock, p.Name, rw.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeFairRWLock):
 			rw := primitives.NewFairRWLock()
@@ -2387,8 +2565,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeFairRWLock, p.Name, rw.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeFairRWLock, p.Name, rw.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeSemaphore):
 			cap := p.Capacity
@@ -2403,8 +2581,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeSemaphore, p.Name, sem.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeSemaphore, p.Name, sem.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeMutex):
 			m := primitives.NewMutex()
@@ -2415,8 +2593,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeMutex, p.Name, m.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeMutex, p.Name, m.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeCondVar):
 			cv := primitives.NewCondVar()
@@ -2427,8 +2605,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeCondVar, p.Name, cv.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeCondVar, p.Name, cv.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeBarrier):
 			parties := p.Parties
@@ -2443,8 +2621,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeBarrier, p.Name, b.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeBarrier, p.Name, b.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeWaitGroup):
 			wg := primitives.NewWaitGroup()
@@ -2455,8 +2633,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeWaitGroup, p.Name, wg.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeWaitGroup, p.Name, wg.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeOnce):
 			o := primitives.NewOnce()
@@ -2467,8 +2645,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeOnce, p.Name, o.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeOnce, p.Name, o.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		case string(scheduler.TypeSingleflight):
 			g := primitives.NewGroup()
@@ -2479,8 +2657,8 @@ func (s *Server) restoreSnapshotPrimitives(prims []primitiveSnapshot) {
 			cp.primCtxs[p.ID] = primEntry{ctx: primCtx, cancel: primCancel}
 			cp.primCtxsMu.Unlock()
 			cp.mu.Unlock()
-			s.scheduler.RegisterPrimitive(p.ID, scheduler.TypeSingleflight, p.Name, g.GetStats())
-			s.metricsCollector.RegisterPrimitive(p.ID, p.Type, p.Name)
+			s.scheduler.RegisterPrimitive(internalID, scheduler.TypeSingleflight, p.Name, g.GetStats())
+			s.metricsCollector.RegisterPrimitive(internalID, p.Type, p.Name)
 			restored++
 		default:
 			slog.Warn("snapshot: unknown primitive type, skipping", "type", p.Type, "id", p.ID)
