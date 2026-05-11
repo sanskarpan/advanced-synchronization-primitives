@@ -121,6 +121,7 @@ This library implements eight fundamental synchronization primitives entirely fr
 - API key authentication via `Authorization: Bearer <key>` header
 - Optional HS256 JWT authentication via `Config.JWTSecret`
 - JWT roles: `admin` can create/delete/operate, `operator` can operate existing primitives, `viewer` is read-only
+- Namespace isolation: clients share primitives only within the same namespace
 - Per-connection sliding-window rate limit: 200 messages/second
 - Connection cap: `Config.MaxConns` (default 1000)
 - HTTP server timeouts: ReadHeader=5 s, Read=10 s, Write=30 s, Idle=120 s
@@ -509,8 +510,16 @@ All WebSocket messages are JSON objects with a `type` string field and a `payloa
 | `TLSKeyFile` | `string` | `""` | Path to TLS private key PEM file. |
 | `APIKey` | `string` | `""` | When non-empty, clients must send `Authorization: Bearer <key>`. |
 | `JWTSecret` | `string` | `""` | When non-empty, clients must send an HS256 Bearer JWT. Missing or unknown JWT roles fall back to `viewer`. |
+| `DefaultNamespace` | `string` | `"default"` | Namespace used when the client supplies no namespace. |
 | `MaxConns` | `int` | `1000` | Maximum simultaneous WebSocket connections. |
 | `SnapshotPath` | `string` | `""` | File path for JSON state persistence. Empty disables persistence. |
+
+### Namespaces
+
+- Unauthenticated browser and WebSocket clients can connect to `/ws?ns=<namespace>`.
+- When JWT auth is enabled, the `namespace` claim is used instead of the query parameter.
+- Scheduler and metrics use internal `namespace/id` keys; client-facing payloads keep plain primitive IDs.
+- Snapshot persistence stores one namespace per snapshot file and records the namespace in the snapshot envelope.
 
 ### CLI Flags (`cmd/server`)
 
