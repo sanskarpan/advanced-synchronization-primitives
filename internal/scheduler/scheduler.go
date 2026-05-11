@@ -11,13 +11,14 @@ import (
 type PrimitiveType string
 
 const (
-	TypeRWLock      PrimitiveType = "RWLock"
-	TypeSemaphore   PrimitiveType = "Semaphore"
-	TypeMutex       PrimitiveType = "Mutex"
-	TypeCondVar     PrimitiveType = "CondVar"
-	TypeBarrier     PrimitiveType = "Barrier"
-	TypeWaitGroup   PrimitiveType = "WaitGroup"
-	TypeOnce        PrimitiveType = "Once"
+	TypeRWLock       PrimitiveType = "RWLock"
+	TypeFairRWLock   PrimitiveType = "FairRWLock"
+	TypeSemaphore    PrimitiveType = "Semaphore"
+	TypeMutex        PrimitiveType = "Mutex"
+	TypeCondVar      PrimitiveType = "CondVar"
+	TypeBarrier      PrimitiveType = "Barrier"
+	TypeWaitGroup    PrimitiveType = "WaitGroup"
+	TypeOnce         PrimitiveType = "Once"
 	TypeSingleflight PrimitiveType = "Singleflight"
 )
 

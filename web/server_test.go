@@ -308,6 +308,27 @@ func TestWebSocketCreateRWLock(t *testing.T) {
 	}
 }
 
+// TestWebSocketCreateFairRWLock verifies createFairRWLock returns success.
+func TestWebSocketCreateFairRWLock(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // consume initialState
+
+	sendMsg(t, conn, "createFairRWLock", map[string]string{
+		"id":   "fair-rw-1",
+		"name": "test-fair-rwlock",
+	})
+
+	msg := drainUntilType(t, conn, "success")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if payload == nil || payload["message"] == nil {
+		t.Errorf("expected success payload, got %v", msg)
+	}
+}
+
 // TestWebSocketCreateSemaphoreZeroCapacity verifies capacity=0 returns error.
 func TestWebSocketCreateSemaphoreZeroCapacity(t *testing.T) {
 	ts, _, cleanup := newTestServer(t)
@@ -421,6 +442,33 @@ func TestWebSocketPrimitiveOpRLock(t *testing.T) {
 
 	sendMsg(t, conn, "primitiveOp", map[string]string{
 		"id": "rw-op",
+		"op": "rlock",
+	})
+
+	msg := drainUntilType(t, conn, "success")
+	payload, _ := msg["payload"].(map[string]interface{})
+	if payload == nil {
+		t.Fatalf("expected success payload")
+	}
+}
+
+// TestWebSocketPrimitiveOpFairRLock creates a FairRWLock and performs rlock op.
+func TestWebSocketPrimitiveOpFairRLock(t *testing.T) {
+	ts, _, cleanup := newTestServer(t)
+	defer cleanup()
+
+	conn := dialWS(t, ts)
+	defer conn.Close()
+	readMsg(t, conn) // consume initialState
+
+	sendMsg(t, conn, "createFairRWLock", map[string]string{
+		"id":   "fair-rw-op",
+		"name": "op-fair-rwlock",
+	})
+	drainUntilType(t, conn, "success")
+
+	sendMsg(t, conn, "primitiveOp", map[string]string{
+		"id": "fair-rw-op",
 		"op": "rlock",
 	})
 
@@ -1137,8 +1185,8 @@ func TestHealthzMethodNotAllowed(t *testing.T) {
 
 func TestHealthzIncludesCustomHistogramBuckets(t *testing.T) {
 	srv := web.NewServerWithConfig(web.Config{
-		AllowedOrigins:    []string{"*"},
-		HistogramBuckets:  []time.Duration{time.Millisecond, 10 * time.Millisecond},
+		AllowedOrigins:   []string{"*"},
+		HistogramBuckets: []time.Duration{time.Millisecond, 10 * time.Millisecond},
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.HandleHealthz)
