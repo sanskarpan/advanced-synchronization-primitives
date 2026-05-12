@@ -49,13 +49,16 @@ jobs:
         run: go build ./examples/...
 
       - name: Security scan (gosec)
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -severity medium -confidence medium \
-            -exclude-generated \
-            -fmt sarif \
-            -out gosec-results.sarif \
-            ./... || true
+        uses: securego/gosec@v2
+        with:
+          args: >-
+            -no-fail
+            -severity medium
+            -confidence medium
+            -exclude-generated
+            -fmt sarif
+            -out gosec-results.sarif
+            ./...
 
       - name: Upload gosec SARIF report
         uses: github/codeql-action/upload-sarif@v4
